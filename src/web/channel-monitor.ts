@@ -53,7 +53,7 @@ import { notifyChannel } from '../notify.js'
 import { sendRoutineAlert } from './routine-alert.js'
 import { getProvider, channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
 import { attemptChannelMcpReconnect } from './channel-mcp-reconnect.js'
-import { readLastIngestionTimestamp, TRANSCRIPT_DIR } from './inbound-probe.js'
+import { readLastIngestionTimestampAcross, mainTranscriptDirs } from './inbound-probe.js'
 import {
   decideDownAgentAction,
   AGENT_MAX_RESTART_ATTEMPTS,
@@ -1578,7 +1578,7 @@ export function shouldRefreshKeepaliveFromInbound(
 // effort; never throws into the monitor tick.
 function refreshKeepaliveFromInbound(): void {
   try {
-    const lastInboundTs = readLastIngestionTimestamp(TRANSCRIPT_DIR)
+    const lastInboundTs = readLastIngestionTimestampAcross(mainTranscriptDirs())
     let mtimeMs = 0
     try { mtimeMs = statSync(KEEPALIVE_FILE).mtimeMs } catch { /* missing -> 0 */ }
     if (!shouldRefreshKeepaliveFromInbound(lastInboundTs, mtimeMs)) return
