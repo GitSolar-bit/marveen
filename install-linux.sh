@@ -1801,6 +1801,17 @@ ${TZ_LINE}
 EOF
 
 # ${MORN_UNIT}.timer
+# WRITTEN BUT NOT ENABLED (see the enable list further down). The morning
+# briefing ships TWICE: as this 07:27 timer and as the seeded
+# scheduled-tasks/reggeli-napindito task at 07:30. Two runs of the same work
+# three minutes apart is one too many, and the timer is the weaker of the two:
+# it launches a headless `claude -p` whose config dir carries no channel
+# allowlist, so its reply tool rejects the owner's chat_id and the run refuses
+# itself as a prompt injection (observed 2026-09-13, and it stamped the day as
+# delivered on the way out). The scheduled task runs inside the live channel
+# session, which has the allowlist. The unit files stay on disk so an operator
+# who wants the timer path can `systemctl --user enable --now <id>-morning.timer`.
+#
 # NO Requires=/Wants= on the service here: a [Unit] dependency on the
 # triggered service makes EVERY activation of the timer unit (each systemd
 # user-manager start, not just the 07:27 elapse) queue an immediate start of
@@ -1904,14 +1915,17 @@ if pidof systemd >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1; the
   # macOS branch had. `if` rather than `&&`: a failing enable inside an if
   # CONDITION is exempt from errexit and from the ERR trap, so the installer
   # reports it instead of dying on it.
-  if systemctl --user enable "${DASH_UNIT}" "${CHAN_UNIT}" "${MORN_UNIT}.timer" "${SERVICE_ID}-host-watchdog.service" 2>/dev/null; then
+  # ${MORN_UNIT}.timer is deliberately NOT in this list -- the seeded
+  # reggeli-napindito scheduled task already delivers the morning briefing at
+  # 07:30 from inside the live channel session. See the timer's comment above.
+  if systemctl --user enable "${DASH_UNIT}" "${CHAN_UNIT}" "${SERVICE_ID}-host-watchdog.service" 2>/dev/null; then
     ok "systemd unitok generalva es engedelyezve"
   else
     warn "A unit-fajlok elkeszultek, de az engedelyezesuk nem sikerult -- ujrainditas utan a szolgaltatasok nem indulnak el maguktol."
-    # ALL FOUR units the enable above covers, not just the two services. A
-    # command that silently drops the timer and the watchdog would leave them
-    # disabled while the operator sees no error and believes the fix worked --
-    # an incomplete instruction ends the same way as a false claim.
+    # ALL THREE units the enable above covers, not just the two services. A
+    # command that silently drops the watchdog would leave it disabled while the
+    # operator sees no error and believes the fix worked -- an incomplete
+    # instruction ends the same way as a false claim.
     # The label gets its own line. With "Javitas most:" in front of the command,
     # the backslashes join all three printed lines into ONE command whose first
     # token is `Javitas`, so a pasted block fails with "Javitas: command not
@@ -1922,7 +1936,7 @@ if pidof systemd >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1; the
     echo -e "  ${DIM}Javitas most:${NC}"
     echo -e "  ${DIM}systemctl --user enable \\${NC}"
     echo -e "  ${DIM}    ${DASH_UNIT} ${CHAN_UNIT} \\${NC}"
-    echo -e "  ${DIM}    ${MORN_UNIT}.timer ${SERVICE_ID}-host-watchdog.service${NC}"
+    echo -e "  ${DIM}    ${SERVICE_ID}-host-watchdog.service${NC}"
   fi
   systemctl --user start "${DASH_UNIT}" "${CHAN_UNIT}" 2>/dev/null || true
   sleep 2
