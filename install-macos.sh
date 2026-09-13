@@ -1358,6 +1358,27 @@ else
   echo -e "    ${DIM}Ellenorzes: launchctl print gui/$(id -u)/${CHANNELS_PLIST} | grep -E 'state|pid'${NC}"
 fi
 
+# Idle-path keepalive probe (launchd twin of the Linux systemd timer). Without
+# it the ONLY producer of store/.channel-keepalive freshness is organic inbound
+# traffic, so a quiet night looks exactly like a wedged session: the file ages
+# past the dashboard's 45-minute liveness ceiling and channel-monitor respawns a
+# healthy main agent (its conversation lost), which kills the channel plugin,
+# which trips the channels watchdog into a second restart. Measured on a live
+# Linux install the night of 2026-09-12/13: 13 restarts, one every ~50 minutes.
+# The probe never fakes liveness -- it proves the session, its claude pid and a
+# descending poller are alive before touching the file -- so a genuinely dead
+# channel still ages out and still gets recovered.
+#
+# The dedicated installer script already exists and is idempotent; --load starts
+# it immediately. Non-fatal: a failed keepalive probe must not fail the install.
+if [ -x "$INSTALL_DIR/scripts/install-channel-keepalive-probe.sh" ]; then
+  if "$INSTALL_DIR/scripts/install-channel-keepalive-probe.sh" --load >/dev/null 2>&1; then
+    ok "Keepalive-szonda telepitve (3 percenkent, hamis respawn ellen)"
+  else
+    warn "A keepalive-szonda telepitese nem sikerult -- inditsd kezzel: scripts/install-channel-keepalive-probe.sh --load"
+  fi
+fi
+
 # Verify channel plugin is working
 sleep 3
 echo ""

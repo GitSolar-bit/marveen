@@ -1684,6 +1684,7 @@ NODE_PATH="$(which node)"
 DASH_UNIT="${SERVICE_ID}-dashboard"
 CHAN_UNIT="${SERVICE_ID}-channels"
 MORN_UNIT="${SERVICE_ID}-morning"
+KEEPALIVE_UNIT="${SERVICE_ID}-channel-keepalive-probe"
 
 # Detect the host timezone so the scheduled-task runner (which reads
 # cron expressions in Node's local TZ) fires at the operator's wall
@@ -1831,6 +1832,59 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
+# ${KEEPALIVE_UNIT}.service/.timer -- token-free IDLE-path keepalive producer.
+#
+# WHY THIS MUST BE INSTALLED (measured on a live install, night of 2026-09-12/13:
+# 13 service restarts, one every ~50 minutes, all night). store/.channel-keepalive
+# has two intended producers: organic inbound (channel-monitor advances the mtime
+# on every ingested message -- covers BUSY periods) and this probe (covers QUIET
+# periods). The repo shipped scripts/channel-keepalive-probe.sh plus placeholder
+# units under scripts/systemd/, but nothing installed them, so on a real host the
+# ONLY producer was inbound traffic. Every night, as soon as the owner stopped
+# writing, the file aged past the dashboard's 45-minute liveness ceiling and
+# channel-monitor "recovered" a perfectly healthy session: respawn-pane (the main
+# agent's conversation gone, restarted fresh with no --continue), which killed the
+# telegram plugin with it, which tripped channels.sh's own dead-plugin watchdog
+# 181s later, which exited 1 for a second, whole-unit restart. A silent channel is
+# normal at 3am; the watchdog read it as a wedge because nothing was left to prove
+# otherwise.
+#
+# The probe does NOT fake liveness: it touches the keepalive only after proving
+# from the process tree that the channels tmux session, its claude pid, and a
+# telegram poller descending from that pid are all alive. A genuinely dead pipe
+# still ages out and still gets recovered.
+cat >"$SYSTEMD_DIR/${KEEPALIVE_UNIT}.service" <<EOF
+[Unit]
+Description=${BOT_NAME} token-free idle-path channel keepalive probe
+
+[Service]
+Type=oneshot
+WorkingDirectory=$INSTALL_DIR
+ExecStart=$INSTALL_DIR/scripts/channel-keepalive-probe.sh
+Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=$HOME
+${TZ_LINE}
+StandardOutput=append:$INSTALL_DIR/store/channel-keepalive-probe.log
+StandardError=append:$INSTALL_DIR/store/channel-keepalive-probe.log
+EOF
+
+# Same "no Requires=/Wants= on the triggered service" rule as the morning timer
+# above: the [Timer] section already binds to ${KEEPALIVE_UNIT}.service by name.
+# 3 minutes is far inside every consumer's staleness threshold (the dashboard's
+# 45-minute ceiling, channel-watchdog's 15).
+cat >"$SYSTEMD_DIR/${KEEPALIVE_UNIT}.timer" <<EOF
+[Unit]
+Description=${BOT_NAME} channel keepalive probe every 3 minutes
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=3min
+AccuracySec=20s
+
+[Install]
+WantedBy=timers.target
+EOF
+
 # marveen-host-watchdog.service -- host/WSL-VM restart detector (btime-based).
 # Distinguishes a whole-VM restart (all units down at once, NOT an app crash)
 # from a service crash, and Telegrams it. See scripts/host-restart-watchdog.sh.
@@ -1918,14 +1972,14 @@ if pidof systemd >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1; the
   # ${MORN_UNIT}.timer is deliberately NOT in this list -- the seeded
   # reggeli-napindito scheduled task already delivers the morning briefing at
   # 07:30 from inside the live channel session. See the timer's comment above.
-  if systemctl --user enable "${DASH_UNIT}" "${CHAN_UNIT}" "${SERVICE_ID}-host-watchdog.service" 2>/dev/null; then
+  if systemctl --user enable "${DASH_UNIT}" "${CHAN_UNIT}" "${KEEPALIVE_UNIT}.timer" "${SERVICE_ID}-host-watchdog.service" 2>/dev/null; then
     ok "systemd unitok generalva es engedelyezve"
   else
     warn "A unit-fajlok elkeszultek, de az engedelyezesuk nem sikerult -- ujrainditas utan a szolgaltatasok nem indulnak el maguktol."
-    # ALL THREE units the enable above covers, not just the two services. A
-    # command that silently drops the watchdog would leave it disabled while the
-    # operator sees no error and believes the fix worked -- an incomplete
-    # instruction ends the same way as a false claim.
+    # ALL FOUR units the enable above covers, not just the two services. A
+    # command that silently drops the keepalive probe or the watchdog would leave
+    # them disabled while the operator sees no error and believes the fix worked
+    # -- an incomplete instruction ends the same way as a false claim.
     # The label gets its own line. With "Javitas most:" in front of the command,
     # the backslashes join all three printed lines into ONE command whose first
     # token is `Javitas`, so a pasted block fails with "Javitas: command not
@@ -1936,7 +1990,7 @@ if pidof systemd >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1; the
     echo -e "  ${DIM}Javitas most:${NC}"
     echo -e "  ${DIM}systemctl --user enable \\${NC}"
     echo -e "  ${DIM}    ${DASH_UNIT} ${CHAN_UNIT} \\${NC}"
-    echo -e "  ${DIM}    ${SERVICE_ID}-host-watchdog.service${NC}"
+    echo -e "  ${DIM}    ${KEEPALIVE_UNIT}.timer ${SERVICE_ID}-host-watchdog.service${NC}"
   fi
   systemctl --user start "${DASH_UNIT}" "${CHAN_UNIT}" 2>/dev/null || true
   sleep 2
