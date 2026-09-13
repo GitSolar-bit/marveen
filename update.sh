@@ -446,9 +446,85 @@ migrate_channels_restart() {
   return 0
 }
 
+# Idle-path keepalive probe installation (Linux only). The repo has shipped
+# scripts/channel-keepalive-probe.sh and placeholder units under scripts/systemd/
+# for a while, but nothing ever installed them, so on every existing host the ONLY
+# producer of store/.channel-keepalive freshness was organic inbound traffic.
+# A quiet night then looks exactly like a wedged session: the file ages past the
+# dashboard's 45-minute liveness ceiling, channel-monitor respawn-panes a healthy
+# main agent (conversation lost, no --continue), that kills the telegram plugin,
+# and channels.sh's dead-plugin watchdog exits 181s later for a second, whole-unit
+# restart. Measured on a live install the night of 2026-09-12/13: 13 restarts, one
+# every ~50 minutes, from midnight until the owner woke up.
+#
+# The installer template fix reaches new installs only -- this is what lands it on
+# the machines that have the bug today. Idempotent: it writes nothing once the
+# timer unit exists. The probe itself never fakes liveness (it proves the session,
+# its claude pid and a descending telegram poller are alive before touching), so a
+# genuinely dead channel still ages out and still gets recovered.
+install_keepalive_probe_timer() {
+  units_dir="${1:-$HOME/.config/systemd/user}"
+  [ -d "$units_dir" ] || return 0
+  [ -x "$INSTALL_DIR/scripts/channel-keepalive-probe.sh" ] || return 0
+  command -v systemctl >/dev/null 2>&1 || return 0
+  # Derive the install's service id from the unit that certainly exists rather
+  # than re-deriving it from .env: the units are what we are extending, and a
+  # renamed agent whose old units are still on disk must get the timer next to
+  # THOSE, not next to a name nothing else uses.
+  for chan_unit in "$units_dir/"*-channels.service; do
+    [ -f "$chan_unit" ] || continue
+    _svc_id="$(basename "$chan_unit" -channels.service)"
+    _ka_unit="${_svc_id}-channel-keepalive-probe"
+    [ -f "$units_dir/${_ka_unit}.timer" ] && continue
+    # BOT_NAME is only assigned further down this script, so read it here
+    # instead of inheriting an empty one into the unit Description.
+    _bot_name="$(sed -n 's/^BOT_NAME=//p' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | tr -d '"')"
+    [ -n "$_bot_name" ] || _bot_name="Marveen"
+    _tz_line="# no explicit TZ detected; inheriting host default"
+    _tz="$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || true)"
+    [ -n "$_tz" ] && [ "$_tz" != "UTC" ] && _tz_line="Environment=TZ=$_tz"
+    cat >"$units_dir/${_ka_unit}.service" <<EOF
+[Unit]
+Description=${_bot_name} token-free idle-path channel keepalive probe
+
+[Service]
+Type=oneshot
+WorkingDirectory=$INSTALL_DIR
+ExecStart=$INSTALL_DIR/scripts/channel-keepalive-probe.sh
+Environment=PATH=$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=$HOME
+${_tz_line}
+StandardOutput=append:$INSTALL_DIR/store/channel-keepalive-probe.log
+StandardError=append:$INSTALL_DIR/store/channel-keepalive-probe.log
+EOF
+    # No Requires=/Wants= on the triggered service -- see repair_morning_timer
+    # above for what that costs.
+    cat >"$units_dir/${_ka_unit}.timer" <<EOF
+[Unit]
+Description=${_bot_name} channel keepalive probe every 3 minutes
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=3min
+AccuracySec=20s
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl --user daemon-reload 2>/dev/null || true
+    if systemctl --user enable --now "${_ka_unit}.timer" >/dev/null 2>&1; then
+      echo -e "  Keepalive-szonda telepitve (3 percenkent, hamis respawn ellen): ${_ka_unit}.timer"
+    else
+      echo -e "  FIGYELEM: ${_ka_unit}.timer unit megirva, de az engedelyezese nem sikerult -- inditsd kezzel: systemctl --user enable --now ${_ka_unit}.timer"
+    fi
+  done
+  return 0
+}
+
 run_unit_maintenance() {
   repair_morning_timer "$@"
   migrate_channels_restart "$@"
+  install_keepalive_probe_timer "$@"
   return 0
 }
 run_unit_maintenance
