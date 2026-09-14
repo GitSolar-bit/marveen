@@ -69,8 +69,14 @@ export const TRANSCRIPT_DIR = join(
 // agent-process.ts), we probe EVERY candidate root and take the newest
 // ingestion across them. A root that is not in use simply yields an older
 // timestamp or none, and "newest wins" is exactly the question being asked.
-export function mainTranscriptDirs(): string[] {
-  const encoded = PROJECT_ROOT.replace(/\//g, '-')
+// The CONFIG ROOTS (not the projects/ subdirs) the main agent may be writing
+// its transcript under. Exported separately from mainTranscriptDirs() because
+// not every caller wants the main agent's own cwd: the schedule runner asks the
+// same question about a task it injected, and needs the roots so it can join
+// them with ITS working dir. Keeping the isolation knowledge in one function is
+// the whole point -- a second copy is what produced the schedule-runner blind
+// spot this list was already supposed to prevent (2026-09-14).
+export function mainConfigRoots(): string[] {
   const roots = [
     join(process.env.HOME ?? homedir(), '.claude'),
     join(PROJECT_ROOT, '.channels-config'),
@@ -87,7 +93,12 @@ export function mainTranscriptDirs(): string[] {
   } catch {
     // keep the defaults
   }
-  const dirs = roots.map(r => join(r, 'projects', encoded))
+  return [...new Set(roots)]
+}
+
+export function mainTranscriptDirs(): string[] {
+  const encoded = PROJECT_ROOT.replace(/\//g, '-')
+  const dirs = mainConfigRoots().map(r => join(r, 'projects', encoded))
   return [...new Set(dirs)]
 }
 
