@@ -43,7 +43,8 @@ import {
 } from './scheduled-tasks-io.js'
 import { listAgentNames, readFileOr, readAgentRemoteHost, agentDir } from './agent-config.js'
 import { resolveAgentConfigDirForRead } from './claude-plans.js'
-import { readTranscriptMtimeFromProjectDir } from './active-model.js'
+import { readTranscriptMtimeAcrossConfigDirs } from './active-model.js'
+import { mainConfigRoots } from './inbound-probe.js'
 import { channelStateDir, getProvider, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
 import {
   agentSessionName,
@@ -139,9 +140,14 @@ export interface TaskInflightEntry {
   sawTurn: boolean
   // Where the target agent's transcripts live, captured at injection time so a
   // config edit mid-flight cannot move the evidence. Reused as the arguments to
-  // readTranscriptMtimeFromProjectDir on every sweep.
+  // readTranscriptMtimeAcrossConfigDirs on every sweep.
+  //
+  // A LIST, not a single root (2026-09-14): the main agent may run under the
+  // shared ~/.claude or under an isolated CLAUDE_CONFIG_DIR, and guessing wrong
+  // blinds the sawTurn probe completely. See the comment at the assignment.
+  // `undefined` inside the list means the shared ~/.claude default.
   workingDir: string
-  configDir: string | undefined
+  configDirs: ReadonlyArray<string | undefined>
   // Per-task stuck threshold, resolved at injection time from the task config
   // (see resolveStuckTimeoutMs). Captured on the entry rather than looked up
   // during the sweep so an edit to the schedule mid-run cannot move the
@@ -964,6 +970,27 @@ async function attemptFireTask(
       ownerAlerted: false,
       sawTurn: false,
       workingDir: agentName === MAIN_AGENT_ID ? PROJECT_ROOT : agentDir(agentName),
+      // THE MAIN AGENT'S OWN BLIND SPOT (2026-09-14, measured on a live host).
+      // This used to hardcode `undefined` for the main agent, i.e. "the main
+      // session always writes under the shared ~/.claude". That stopped being
+      // true with main-agent config isolation: the session runs with
+      // CLAUDE_CONFIG_DIR=<PROJECT_ROOT>/.channels-config and its JSONL lands
+      // there, so the sawTurn probe read a directory frozen days earlier and
+      // returned null on every sweep. sawTurn could then only be set by a pane
+      // sample that happened to catch 'busy' -- which a task finishing between
+      // two sweeps never is. Every fast task was therefore declared 'lost' and
+      // re-injected. Measured over 24h on that host: ledger-live-drain 2509
+      // fires against 720 scheduled (*/2), memoria-heartbeat 259 against ~48, a
+      // 3.5x-5.4x amplification that had been running unnoticed since
+      // 2026-09-11 with a success record on every round.
+      //
+      // Exactly the failure the comment below describes for sub-agents, on the
+      // other side of the same ternary. PR #1312 fixed this family for the
+      // channel watchdogs but did not touch this file; its own notes flagged
+      // the main-agent half as latent because on that host
+      // .channels-config/projects happens to be a symlink to the shared root.
+      // Where it is a real directory the gap is live.
+      //
       // resolveAgentConfigDirForRead, not readAgentClaudeConfigDir -- same
       // reason the context-guard and restart-gate runners use it. Since the
       // fleet auth rule (2026-07-01) an agent's config dir is AUTO-PROVISIONED
@@ -976,7 +1003,9 @@ async function attemptFireTask(
       // re-fired. Measured 2026-09-04 on cortex-voip-insight: 2069 false-lost
       // re-injections in 24h from a */5 task (288 expected), a 7.5x
       // amplification running unnoticed since 2026-08-27.
-      configDir: agentName === MAIN_AGENT_ID ? undefined : (resolveAgentConfigDirForRead(agentName) ?? undefined),
+      configDirs: agentName === MAIN_AGENT_ID
+        ? mainConfigRoots()
+        : [resolveAgentConfigDirForRead(agentName) ?? undefined],
       timeoutMs: resolveStuckTimeoutMs(task),
       runId: firedRunId,
     })
@@ -1546,7 +1575,7 @@ export function startScheduleRunner(): NodeJS.Timeout {
         if (state === 'busy') {
           entry.sawTurn = true
         } else {
-          const mtime = readTranscriptMtimeFromProjectDir(entry.workingDir, entry.configDir)
+          const mtime = readTranscriptMtimeAcrossConfigDirs(entry.workingDir, entry.configDirs)
           if (mtime != null && mtime > entry.injectedAt) entry.sawTurn = true
         }
       }
