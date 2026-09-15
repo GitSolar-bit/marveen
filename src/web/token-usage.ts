@@ -83,7 +83,11 @@ export function discoverAgentSources(projectRootOverride?: string): AgentTranscr
   // Both roots are kept for a migrated agent, not swapped: the pre-migration
   // history is real and lives only in the shared root. Duplicate rows are
   // impossible anyway -- the UNIQUE INDEX on (agent, session_id, timestamp,
-  // input, output) plus INSERT OR IGNORE absorbs any overlap.
+  // input, output) plus the ON CONFLICT ... DO UPDATE upsert at the insert site
+  // absorbs any overlap. The upsert is not a plain INSERT OR IGNORE: on a
+  // conflict it keeps the stored row and only backfills `model` where it is NULL
+  // and `thinking_tokens` where it is NULL or zero, so a re-read can complete a
+  // partial row but never rewrite one.
   for (const name of listAgentNames()) {
     let configDir: string | null = null
     try { configDir = resolveAgentConfigDirForRead(name, projectRootOverride) } catch { continue }
@@ -144,7 +148,8 @@ export function discoverAgentSources(projectRootOverride?: string): AgentTranscr
   // lives only in the shared root. Duplicates cannot arise: dirs are deduped by
   // realpath here (a .channels-config/projects that is merely a SYMLINK back to
   // the shared root resolves to the same path and is skipped), and the UNIQUE
-  // INDEX plus INSERT OR IGNORE absorbs any overlap the cursor table misses.
+  // INDEX plus the ON CONFLICT ... DO UPDATE upsert at the insert site absorbs
+  // any overlap the cursor table misses (backfill-only, see the note above).
   const seenMainDirs = new Set<string>()
   for (const s of sources) {
     if (s.agent !== MAIN_AGENT_ID) continue

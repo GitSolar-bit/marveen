@@ -41,7 +41,7 @@ Segít megérteni:
 
 3. **Cursor tracking**: Fájlonként eltárolja az utolsó feldolgozott sort és fájlméretet (`token_usage_cursors` tábla). Változatlan fájlokat kihagyja, módosultakat az utolsó pozíciótól folytatja.
 
-4. **Deduplication**: `UNIQUE INDEX` az `(agent, session_id, timestamp, input_tokens, output_tokens)` kombináción + `INSERT OR IGNORE`. Ugyanaz a rekord kétszer nem kerül be.
+4. **Deduplication**: `UNIQUE INDEX` az `(agent, session_id, timestamp, input_tokens, output_tokens)` kombináción + `ON CONFLICT ... DO UPDATE` upsert. Ugyanaz a rekord kétszer nem kerül be; ütközéskor a tárolt sor marad, és csak a `model` (ha NULL) és a `thinking_tokens` (ha NULL vagy nulla) töltődik utólag. Nem `INSERT OR IGNORE`: az upsert kiegészíteni tud egy hiányos sort, felülírni nem.
 
 ### API végpontok (`src/web/routes/token-usage.ts`)
 
