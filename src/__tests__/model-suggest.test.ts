@@ -318,6 +318,20 @@ describe('suggestForAgent -- per-call context signal (MODELSUGGESTCACHE917)', ()
     expect(49_483).toBeLessThanOrEqual(CONTEXT_PER_CALL_MEDIUM)
   })
 
+  // Second blind spot in the same endpoint, same family: a real number counted
+  // over the wrong set. archived_at IS NULL alone counts DONE cards as open,
+  // because a done card is archived only by the 7-day sweep. Measured on the
+  // live install 2026-09-17: 14 open / 6 urgent reported, 8 / 2 actual.
+  // kanbanUrgentCount >= 2 is an Opus signal, so the inflated count feeds the
+  // verdict directly.
+  it('the route counts only OPEN cards as kanban load', async () => {
+    const { readFileSync } = await import('node:fs')
+    const src = readFileSync(new URL('../web/routes/agents.ts', import.meta.url), 'utf-8')
+    const kanbanQuery = /SELECT assignee, priority, COUNT\(\*\) as cnt[\s\S]*?GROUP BY assignee, priority/.exec(src)
+    expect(kanbanQuery).not.toBeNull()
+    expect(kanbanQuery![0]).toMatch(/status\s*<>\s*'done'/)
+  })
+
   it('the route feeds the whole context, not the uncached remainder', async () => {
     // The decision above is invisible from outside if the caller still passes
     // totalInput alone -- and that caller is a route with db/tmux/fs I/O, so

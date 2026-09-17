@@ -893,13 +893,24 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       ])
     )
 
-    // Kanban: open and urgent/high card counts per assignee
+    // Kanban: OPEN and urgent/high card counts per assignee.
+    //
+    // status <> 'done' is the point: archived_at IS NULL alone counts finished
+    // cards as open, because a done card is only archived by the 7-day sweep
+    // (and a level-1 autonomy setting can stop even that). MEASURED 2026-09-17
+    // on the live install: the main agent showed "14 aktív kártya, ebből 6
+    // sürgős/magas" while it actually had 8 open and 2 urgent/high -- 6 of the
+    // 14 were done, and 4 of the 6 urgent ones were done. kanbanUrgentCount >= 2
+    // is an Opus signal, so the inflated count feeds the suggestion directly;
+    // that day it happened not to flip the verdict, which is luck, not
+    // correctness. Same family as the token signal fixed in the same commit
+    // range: a real number measured over the wrong set.
     const db = getDb()
     type KanbanRow = { assignee: string | null; priority: string; cnt: number }
     const kanbanRows = db.prepare(
       `SELECT assignee, priority, COUNT(*) as cnt
        FROM kanban_cards
-       WHERE archived_at IS NULL AND assignee IS NOT NULL
+       WHERE archived_at IS NULL AND assignee IS NOT NULL AND status <> 'done'
        GROUP BY assignee, priority`
     ).all() as KanbanRow[]
     const kanbanMap = new Map<string, { open: number; urgent: number }>()
