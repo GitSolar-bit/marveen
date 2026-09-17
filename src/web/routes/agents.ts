@@ -867,11 +867,30 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // Collect runtime signals once, then classify per agent.
     // I/O is centralised here; the classifier (model-suggest.ts) stays pure.
 
-    // Token usage: per-agent average input tokens/call over the last 30 days
+    // Token usage: per-agent average CONTEXT carried per call over the last 30
+    // days -- input + cache-read + cache-creation, not totalInput alone.
+    //
+    // totalInput is SUM(input_tokens): the uncached remainder only. On a
+    // long-lived session nearly the whole context arrives as cache reads, so
+    // that remainder is a rounding error, and the classifier read it as a tiny
+    // context. MEASURED 2026-09-17 on the live install: 2.9 tokens/call over 30
+    // days (17,325 calls) against a true 354,271 -- and the main agent was
+    // therefore advised to DOWNGRADE to Sonnet, the opposite of what its own
+    // threshold means. Same defect family as the transcript-root blind spots
+    // (SCHEDLOST914, TOKENVAK915, GATEVAK917): a measurement that reads a real
+    // number from the wrong place and so never looks broken.
+    //
+    // getTokenSummary().totalInput itself stays as it is: the token-usage
+    // dashboard shows the four columns separately and wants the raw one.
     const thirtyDaysAgo = Math.floor(Date.now() / 1000) - 30 * 24 * 3600
     const tokenSummaries = getTokenSummary(thirtyDaysAgo)
     const tokenMap = new Map(
-      tokenSummaries.map(s => [s.agent, s.totalCalls > 0 ? s.totalInput / s.totalCalls : 0])
+      tokenSummaries.map(s => [
+        s.agent,
+        s.totalCalls > 0
+          ? (s.totalInput + s.totalCacheRead + s.totalCacheCreation) / s.totalCalls
+          : 0,
+      ])
     )
 
     // Kanban: open and urgent/high card counts per assignee
@@ -947,7 +966,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
 
       const kanban = kanbanMap.get(name)
       const signals: AgentSignals = {
-        tokenAvgInputPerCall: tokenMap.has(name) ? tokenMap.get(name) : undefined,
+        contextAvgPerCall: tokenMap.has(name) ? tokenMap.get(name) : undefined,
         kanbanOpenCount: kanban?.open,
         kanbanUrgentCount: kanban?.urgent,
         scheduledFreqPerDay: schedFreqMap.has(name) ? schedFreqMap.get(name) : undefined,
