@@ -1993,6 +1993,104 @@ export function ensureMemorySearchLabelSection(name: string): void {
   atomicWriteFileSync(claudeMdPath, updated)
 }
 
+// AUTHSECT919: the fleet auth rule existed only as hand-written prose in the
+// agent CLAUDE.md files on one install. Measured 2026-09-19 on the owner host:
+// all 22 agents carried it, NO generating surface did -- not generateClaudeMd,
+// not templates/CLAUDE.md.template. So every agent created from here on would
+// have missed it, and the miss is silent: the agent only finds out when it
+// "fixes" a Not-logged-in with a credential symlink and re-creates the 401
+// cascade the rule exists to prevent.
+//
+// SCOPE CORRECTION (review of #1409): the first draft of this block also
+// forbade `claudeConfigDir` and described the MAIN agent as isolated. Both were
+// LOCAL OPERATIONAL CHOICES on one install, generated out as if they were
+// product-level prohibitions -- and both contradict supported behaviour:
+//   - per-agent `claudeConfigDir` is a resolved, supported field (see
+//     resolveClaudeConfigDir in web/agent-config.ts, including the named-plan
+//     indirection), for agents that need their own Claude login or plan;
+//   - MAIN_AGENT_ISOLATED_CONFIG defaults to '0' (config-registry.ts), i.e. the
+//     main channels agent uses the SHARED ~/.claude unless switched on, and
+//     MAIN_AGENT_CONFIG_DIR takes precedence over it when the bot has its own
+//     login.
+// A generated doc block must state the product's real auth design. Narrowing a
+// supported field is a separate, explicit decision -- not a side effect of
+// shipping documentation. What survives here is the part that is actually
+// non-negotiable: the fix for "Not logged in" is the token source, and no agent
+// ever copies another agent's credentials.
+//
+// A marker block (not a template line) on purpose: the template only reaches
+// agents created after the change, while this also refreshes the wording for
+// agents already on disk.
+const FLEET_AUTH_BEGIN = '<!-- BEGIN GENERATED: fleet-auth (auto-generated, do not edit by hand) -->'
+const FLEET_AUTH_END = '<!-- END GENERATED: fleet-auth -->'
+const FLEET_AUTH_BLOCK_RE = new RegExp(
+  `${FLEET_AUTH_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${FLEET_AUTH_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
+)
+
+// Host-agnostic on purpose: no operator name, no per-install agent names. The
+// rule is about the auth PATH, which is identical on every install.
+export function buildFleetAuthBody(): string {
+  return [
+    '## Flotta-szintű AUTH-szabály (MEGSZEGHETETLEN)',
+    '',
+    'A sub-agentek alapértelmezés szerint a `CLAUDE_CODE_OAUTH_TOKEN` úton hitelesítenek',
+    '(`store/.claude-oauth-token`), auto-provisionált `CLAUDE_CONFIG_DIR`-rel. Ez az út',
+    'szünteti meg a visszatérő 401-kaszkádot, amit a kézzel elhelyezett, lejáró',
+    '`.credentials.json` okozott.',
+    '',
+    'A fő channels-agent ettől SZÁNDÉKOSAN eltér: alapértelmezésben a közös `~/.claude`-ot',
+    'használja. A `MAIN_AGENT_ISOLATED_CONFIG=1` kapcsolja át a flotta setup-tokenjére; ha',
+    'a botnak SAJÁT Claude-loginja van, arra a `MAIN_AGENT_CONFIG_DIR` való, és az',
+    'elsőbbséget élvez.',
+    '',
+    'A per-agent `claudeConfigDir` TÁMOGATOTT mező (nevesített plan-en keresztül is), arra',
+    'az esetre, ha egy agentnek saját Claude-loginra vagy saját plan-re van szüksége. A',
+    'használata döntés kérdése, nem tilalom.',
+    '',
+    'AMI VISZONT MEGSZEGHETETLEN:',
+    '',
+    '1. Ha egy agent "Not logged in"-t mutat, a javítás a TOKEN-FORRÁS, nem egy kézzel',
+    '   elhelyezett vagy symlinkelt `.credentials.json`. A kézi credential-elhelyezés hozta',
+    '   vissza a 401-kaszkádot minden alkalommal: a lejárt fájl a Claude Code precedenciája',
+    '   miatt akkor is nyer az érvényes env-tokennel szemben, ha az ott van mellette.',
+    '2. SOHA ne másold át másik agent tokenjét vagy credentialjét. Új agent SAJÁT,',
+    '   per-agent tokent és saját külső-szolgáltatás setupot kap (saját email, egyedi port,',
+    '   saját creds-könyvtár, saját OAuth). A másolás auditálhatatlan, és más megbízó',
+    '   adatához is hozzáférést ad.',
+  ].join('\n')
+}
+
+// Same five-rule idempotency contract as the sections above, plus the
+// skip-where-already-documented rule borrowed from ensureMemorySearchLabelSection:
+// the 22 agents that got the rule by hand must not end up with two copies.
+// One-directional, like there -- once the marker block is in a file it is
+// refreshed in place forever, so a wording fix still reaches every agent.
+export function ensureFleetAuthSection(name: string): void {
+  const claudeMdPath = name === MAIN_AGENT_ID
+    ? join(PROJECT_ROOT, 'CLAUDE.md')
+    : join(agentDir(name), 'CLAUDE.md')
+  if (!existsSync(claudeMdPath)) return
+
+  let existing: string
+  try {
+    existing = readFileSync(claudeMdPath, 'utf-8')
+  } catch {
+    return
+  }
+
+  const hasBlock = FLEET_AUTH_BLOCK_RE.test(existing)
+  // Hand-written copy already present and no block of ours: leave it alone.
+  if (!hasBlock && /AUTH-szabály/i.test(existing)) return
+
+  const block = `${FLEET_AUTH_BEGIN}\n${buildFleetAuthBody()}\n${FLEET_AUTH_END}`
+  const updated = hasBlock
+    ? existing.replace(FLEET_AUTH_BLOCK_RE, block)
+    : existing.trimEnd() + '\n\n' + block + '\n'
+
+  if (updated === existing) return
+  atomicWriteFileSync(claudeMdPath, updated)
+}
+
 export async function generateClaudeMd(name: string, description: string, model: string): Promise<string> {
   // Distribution-safe default-drive line: only emit a concrete folder when this
   // install has one configured (OWNER_DRIVE_FOLDER). A fresh install with no
