@@ -19,8 +19,15 @@ Hasznalat:
       --msg-file /path --author Boni [--priority normal] [--status planned] [--dry-run]
 A felado MINDKET modban KIMONDOTT (KARTYAKULDO908, 2026-09-08): a letrehozo agon --author vagy
 --from kell, kulonben megtagadas. Korabban csendben 'marveen' lett belole.
-Az onmagunknak (marveen) vagy a gazdanak (szabolcs) szolo kartya ertesites nelkul is mehet:
-ott a --no-msg kapcsolo kell, KIMONDVA.
+A SAJAT MAGUNKNAK NYITOTT KARTYA IS ERTESITEST KER, BARMELYIK AGENSNEL (FLEETKIVETEL922,
+2026-09-22): a letrehozo kapu a FLEET minden tagjara all, es 2026-09-22 ota a koordinator
+(marveen) is a FLEET tagja. Sajat kartyahoz tehat vagy --no-msg kell, KIMONDVA, vagy --msg-file --
+utobbi ilyenkor a KOORDINATORHOZ iranyul (onhurok-atiranyitas), ami VALODI JEL: a koordinator
+megtudja, hogy valaki elindult valamin. Ezt a jelet szandekosan NEM oltuk ki egy szerzo-alapu
+kivetellel; a degeneralt eset (a koordinator SAJAT kartyaja, ahol nincs hova atiranyitani) egyetlen
+FIGYELEM-sort jelent, es az olcsobb, mint a flotta-szintu jel elvesztese.
+A GAZDANAK (szabolcs) szolo kartya MAS: o nincs a FLEET-ben, mert neki az inter-agent uzenet
+szerkezetileg nem kezbesitheto -- ott a kapu nem is all, a kimenet viszont kimondja a hianyt.
 A GAZDANAK --msg-file-lal is lehet kartyat adni, de az ertesites NEM megy ki (GAZDAUZENET921,
 2026-09-21): a gazda nem agens, nincs sessionje, a sor mindig failed lett (19/19), es az eszkoz
 megis zold UZENET OK-ot irt, mert a sort olvasta vissza, nem a kezbesitest. Most a kimenet
@@ -110,7 +117,7 @@ def _db_kapu():
                  f'(gyoker: {ROOT})\nEz jellemzoen egy korabbi rossz ut-feloldas hagyta ott. Mondd ki:\n'
                  f'CLAUDECLAW_ROOT=<a fo fa> vagy KARTYA_DB=<a db utvonala>.')
     return DB
-def _token_kapu(dry_run, elozmeny=None):
+def _token_kapu(dry_run, elozmeny=None, farok=None):
     """A dashboard-token feloldasa, EGY helyen -- hogy a dry-run ES az eles ag UGYANAZT a
     kaput fussa. A ket ag CSAK a mondatban ter el, mert a KOVETKEZMENY ter el: az eles agon
     a kartya EKKOR MAR LETREJOTT (a token-kapu az 5. lepesben all, a 4. lepes irasa utan),
@@ -132,13 +139,38 @@ def _token_kapu(dry_run, elozmeny=None):
             'A KARTYA LETREJOTT, DE AZ UZENET NEM MENT KI:')
         sys.exit(f'{elozmeny} nincs dashboard-token itt:\n'
                  f'  {tokpath}\n(gyoker: {ROOT}). Mondd ki: CLAUDECLAW_ROOT=<a fo fa> vagy KARTYA_TOKEN=<token>.\n'
-                 + ('A dry-run ezert PIROS: az eles futas reszlegesen irna (kartya igen, uzenet nem).'
-                    if dry_run else
-                    'Kuldd el kezzel az uzenetet, kulonben a kartya nema marad.'))
+                 + (farok or
+                    ('A dry-run ezert PIROS: az eles futas reszlegesen irna (kartya igen, uzenet nem).'
+                     if dry_run else
+                     'Kuldd el kezzel az uzenetet, kulonben a kartya nema marad.')))
     return open(tokpath).read().strip()
 
 
-FLEET = {'samu','zara','boni','iris','dani','geri','deeper','qwen','mira','tomi','jumanji','hidli'}
+# A FLOTTA: akinek a kartyajarol ERTESITES jar, mert agens-sessionje van, es az inter-agent uzenet
+# tenylegesen kezbesitheto neki.
+#
+# A KOORDINATOR (marveen) 2026-09-22 OTA BENNE VAN (FLEETKIVETEL922). Korabban kimaradt, es a
+# kihagyas a KAPUT tette dekoracciova: merve a 30 napos ablakon (kanban_comments JOIN kanban_cards,
+# a szerzo flotta-agens es nem a felelos), a cel-forgalom igy oszlott meg:
+#     marveen kartyaira 1003 (51%)  <- a kapu ATENGEDTE
+#     FLEET kartyaira    656 (33%)  <- a kapu megallt
+#     egyeb/kulso        320 (16%)  <- szandekosan atengedi
+# Vagyis a legnagyobb egyetlen celcsoport a kivetelben allt: a kapu a cel-forgalom egyharmadat
+# fedte. (Ketten, kulon mertuk: Marveen 1003/656/315, Geri 1003/656/320 -- az elteres a RELATIV
+# 30 napos ablak csuszasa a ket futas kozott, nem ket muszer kulonbsege.)
+#
+# A KIVETEL LATSZOLAG JO INDOKA -- "a fo-agens ugyis latja a tablat" -- MERHETO ESEMENYEN BUKOTT EL:
+# a fo-agens kontextusa 92%-on ujraindult (context-guard), es a kontextusba kerulo kanban-blokk a
+# kartya-ALLAPOTOT viszi, nem a KOMMENT-TORZSEKET. Egy restart-ablakban eppen a kartyara irt komment
+# az, amit nem lat.
+#
+# A GAZDA (szabolcs) SZANDEKOSAN KINT MARAD, es ez nem feledekenyseg: neki nincs agens-sessionje, az
+# inter-agent uzenet szerkezetileg NEM kezbesitheto (GAZDAUZENET921: 19 failed / 0 delivered a teljes
+# tortenetben). Merve ugyanabban az ablakban: 251 komment megy gazda-felelosu kartyara. Ha a kapu
+# rajuk is allna, 251 esetben olyat kovetelne, amit teljesiteni sem lehet -- a gazdahoz Telegramon
+# kell szolni, nem uzenetsoron.
+FLEET = {'samu','zara','boni','iris','dani','geri','deeper','qwen','mira','tomi','jumanji','hidli',
+         'marveen'}
 COORDINATOR = 'marveen'
 GAZDA = 'szabolcs'
 # Ismert FELELOS-nevek. NEM zart halmaz: a tablan 2026-09-06-an 40 kulonbozo felelos allt, es a
@@ -603,7 +635,9 @@ def komment_mod(a):
             ' a komment SEM irodna be (a kapu az iras ELOTT all):'
             if a.dry_run else
             'MEGTAGADVA: nincs token, tehat az ERTESITES nem mehet ki, ezert a komment SEM'
-            ' irodott be (a kapu az iras ELOTT all):'))
+            ' irodott be (a kapu az iras ELOTT all):'),
+            farok=('SEMMI NEM VESZETT EL: add meg a tokent (KARTYA_TOKEN vagy CLAUDECLAW_ROOT),'
+                   ' es futtasd ujra ugyanezt a parancsot.'))
     if a.nincs_ertesites_szandekos and _ertesitendo:
         # UGYANAZ A SZIMMETRIA, MINT A --no-msg-nel: a kimondott kihagyas LATSZODJON a kimeneten,
         # kulonben maga a KAPCSOLO valik szokassá -- ugyanaz a vaksag egy lepessel arrebb.
