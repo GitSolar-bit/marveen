@@ -298,7 +298,27 @@ Respond ONLY with JSON, nothing else:
       json(res, { error: 'Content rejected by security filter' }, 400)
       return true
     }
-    if (updateMemory(id, effectiveContent, newCategory, agent_id, keywords)) { json(res, { ok: true }); return true }
+    if (updateMemory(id, effectiveContent, newCategory, agent_id, keywords)) {
+      // Same warn-only homoglyph check as the POST above (HOMOGLIFPATCH919).
+      // It was missing here, and this is the endpoint the house rules point at:
+      // "fix the bad memory, do not write a second one next to it" means the
+      // CORRECTION arrives by PATCH -- so a Cyrillic character slipped in while
+      // repairing a memory went unreported, on the exact path meant to repair
+      // one. Only report when the caller actually SENT content: a tier-only
+      // move backfills `effectiveContent` from the stored row, and warning
+      // about pre-existing characters the caller never touched would be noise.
+      if (content !== undefined) {
+        const homoglyphs = detectHomoglyphs(content)
+        if (homoglyphs.length > 0) {
+          const warning = formatHomoglyphWarning(homoglyphs)
+          logger.warn({ agent: agent_id, memoryId: id }, `memory updated with ${warning}`)
+          json(res, { ok: true, homoglyph_warning: warning })
+          return true
+        }
+      }
+      json(res, { ok: true })
+      return true
+    }
     json(res, { error: 'Memory not found' }, 404)
     return true
   }

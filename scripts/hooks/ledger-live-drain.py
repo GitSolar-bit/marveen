@@ -60,12 +60,23 @@ def _record_surfaced(path, message_id):
 
 
 def main():
+    # TOKENEGES917: --dry-run answers "would this surface anything?" WITHOUT
+    # consuming the signal. The schedule-runner pre-check gate needs exactly
+    # that: it runs OUTSIDE the LLM round, so if it recorded the message_id as
+    # surfaced, the round itself would then find nothing and the question would
+    # be lost. A gate must never eat the signal it is gating on.
+    dry_run = "--dry-run" in sys.argv[1:]
     agent_id = ledger_lib.agent_id_from_cwd(os.getcwd())
 
     try:
         oq = ledger_lib.open_question_with_age(agent_id)
     except Exception:
-        sys.exit(0)  # ledger unavailable -> silent no-op
+        # Normal run: silent no-op (a dead drain must never break the round).
+        # --dry-run: exit NON-ZERO instead. The pre-check gate reads exit 0 +
+        # empty stdout as "nothing to do, skip the model", and a broken probe
+        # must not be indistinguishable from a genuinely quiet channel
+        # (TOKENEGES917). Non-zero makes the gate fail OPEN.
+        sys.exit(2 if dry_run else 0)
     if not oq:
         sys.exit(0)  # nothing open (none, or already answered)
     # Prefix-slice on purpose (HOOKARITAS821): this unpack sits outside the
@@ -95,7 +106,8 @@ def main():
             f'attachment_file_id="{att_file_id}") mielőtt válaszolsz.]'
         )
     sys.stdout.write(f"OPEN_QUESTION chat_id={chat_id} message_id={message_id}\n{snippet}\n")
-    _record_surfaced(path, message_id)
+    if not dry_run:
+        _record_surfaced(path, message_id)
     sys.exit(0)
 
 

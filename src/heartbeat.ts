@@ -455,7 +455,13 @@ function buildAgentPrompt(data: HeartbeatData): string {
   let prompt = UNTRUSTED_PREAMBLE + '\n'
   prompt += `Heartbeat ellenorzes -- ${timeStr}\n\n`
   prompt += `Az alabbi adatokat gyujtottem nativ modon (API/DB). Fogalmazz tomor, emberi osszefoglalot ${OWNER_NAME} szamara.\n`
-  prompt += `FONTOS: Nezd meg az emaileket is MCP-n keresztul (search_emails, utolso 2 ora, olvasatlanok).\n`
+  // There is no `search_emails` tool on this install -- the line asking for one
+  // stood here until MAILTOOLFANTOM923 and sent every heartbeat round looking
+  // for a tool that does not exist. Mail comes from the Google helper script,
+  // one account per call, and the three account names are the ones the morning
+  // briefing uses.
+  prompt += `FONTOS: Nezd meg az emaileket is. NINCS search_emails eszkoz ezen a gepen; a parancs:\n`
+  prompt += `  python3 scripts/google.py mail laszlo --hours 2   (ugyanigy: bobek, bitangue)\n`
   prompt += `Hasznald a HEARTBEAT.md formatumot.\n\n`
 
   // MAINBOXPARK816 stage 1: a parked main-agent input box silences the channel

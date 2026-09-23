@@ -56,6 +56,27 @@ PENDING_FILE = GARMIN_DIR / "pending_run_analysis.txt"
 MARVEEN_DIR = Path(__file__).resolve().parents[1]
 TOKEN_FILE = MARVEEN_DIR / "store" / ".dashboard-token"
 MESSAGES_URL = "http://localhost:3420/api/messages"
+
+def main_agent_id() -> str:
+    """The installation's own main-agent id, read at call time.
+
+    BEEGETETT913: this used to be a hardcoded agent name from the upstream
+    install. A name that does not exist here is not a loud failure -- the
+    dashboard accepts the POST and the message lands in a mailbox nobody
+    reads, so the alert is lost exactly when it matters. The .env is the
+    authority; the fallback is only for a stripped-down checkout.
+    """
+    env = MARVEEN_DIR / ".env"
+    try:
+        for line in env.read_text(encoding="utf-8").splitlines():
+            if line.startswith("MAIN_AGENT_ID="):
+                value = line.split("=", 1)[1].strip().strip("\"'")
+                if value:
+                    return value
+    except OSError:
+        pass
+    return "hex"
+
 # Proof-of-life artefact: its mtime answers "did the silent path actually run
 # today", which "is the task enabled" does not.
 HEARTBEAT_FILE = MARVEEN_DIR / "store" / "garmin-run-gate-last.txt"
@@ -108,8 +129,8 @@ def notify_seven(activity_id: str) -> None:
     token = TOKEN_FILE.read_text().strip()
     payload = json.dumps(
         {
-            "from": "geordi",
-            "to": "seven",
+            "from": "garmin-gate",
+            "to": main_agent_id(),
             "content": NOTIFY_TEMPLATE.format(
                 activity_id=activity_id, pending=PENDING_FILE
             ),

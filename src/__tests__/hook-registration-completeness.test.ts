@@ -31,6 +31,14 @@ const HOOKS_DIR = join(ROOT, 'scripts', 'hooks')
 const REGISTRATION_SURFACES = [
   'templates/settings.json.template',
   '.claude/settings.json',
+  // Local, per-install wiring. Claude Code reads settings.local.json exactly
+  // like settings.json, so a hook registered there IS live -- leaving it out
+  // made this lint report a running hook as dead (measured 2026-09-23:
+  // persona-change-notify.py fires on PostToolUse from here, and the lint
+  // still called it unwired). It does not weaken the lint for shipped code:
+  // the file is gitignored (.gitignore:26) and untracked, so in CI and in a
+  // fresh checkout it does not exist and contributes nothing to the corpus.
+  '.claude/settings.local.json',
   'src/web/agent-scaffold.ts',
   'scripts/install-telegram-progress-hook.sh',
   'scripts/install-channel-image-hook.sh',
@@ -47,6 +55,8 @@ const EXEMPT: Record<string, string> = {
     'shared library imported by outgoing-copy-gate.py (and the level-2 email approval gate, EMAILKAPU901 PR2); not itself a hook',
   'memory-save.sh':
     'legacy: referenced only by a historical rebuild prompt, wired nowhere; kept pending a maintainer decision to remove it',
+  'memoria-heartbeat-precheck.py':
+    'driven by a schedule, not a hook event, and the schedule lives OUTSIDE this repo: ~/.claude/scheduled-tasks/memoria-heartbeat/precheck.sh execs it (schedule-runner runPreCheck protocol). The scheduled-tasks corpus below only reads <repo>/scheduled-tasks, so a user-level task cannot be seen from here',
   'telegram-ack.py':
     'unreferenced anywhere in the repo; dead code kept pending a maintainer decision to remove it',
   'telegram_fallback_send.py':

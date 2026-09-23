@@ -8,27 +8,67 @@
   --bg-code: #f0eee6;
   --text: #141413;
   --text-secondary: #30302e;
-  --text-muted: #87867f;
+  /* Beolvadt a --text-dim-be (Willy, 2026-09-21). A kulon, halvanyabb "cimke" fok
+     3.15-on ult, es nincs "csak cimke" WCAG-kivetel; sotetitve pedig egybeesett
+     volna a dim-mel (1.01). A nev alias marad, hogy a 222 hasznalati hely allhasson. */
+  --text-muted: var(--text-dim);
   /* Dimmed body text that still has to be READ, not just noticed: transcript
      metadata, notes, action lines. Distinct from --text-muted, which sits at
      3.5:1 on this background and is fine for a label next to something else,
      but not for a line someone has to follow. Measured 5.4:1 here. GH #426. */
   --text-dim: #68675f;
   --border: #d1cfc5;
-  --border-focus: #d97757;
+  --border-focus: #d25d37;   /* fokuszgyuru. NEM azonos az --accent-tel: a gyuru
+                                --bg-input-on jelenik meg, ott az accent 2.69-en all.
+                                Merve 2026-09-21: legrosszabb eset 3.37 / 3.38. */
   --accent: #d97757;
   --accent-hover: #c46849;
   --accent-soft: rgba(217, 119, 87, 0.1);
   --danger: #bf4d43;
+  /* B1 (Willy, 2026-09-21): a --warning HUSZ helyen hivatkozott es SEHOL nem volt
+     definialva, ezert mind a husz a sajat fallbackjara esett, NEGY kulonbozo szinre
+     (#f59e0b x9, #d4a52c x7, #c9a000 x2, #d97706 x2), harom valtozat 2.04-2.34 kozott
+     a vilagos --bg-n. Ez az egy sor mind a huszat helyreteszi, hasznalati hely
+     atirasa nelkul. Vilagos 3.06, sotet 5.72 a --bg-n, visszamerve. */
+  --warning: #c78008;
   --danger-soft: rgba(191, 77, 67, 0.12);
   --danger-hover: #a8413a;
   --success: #788c5d;
   --success-soft: rgba(120, 140, 93, 0.12);
   --info: #6a9bcc;
   --info-soft: rgba(106, 155, 204, 0.12);
+  /* Jelveny-szerepek. A -text valtozat azert kulon token es azert temankenti, mert
+     12%-os tinten ugyanaz az ertek nem tud mindket temaban 4.5-ot adni (levezetve). */
+  --badge-heartbeat: #c85078;
+  --badge-heartbeat-text: #b63963;   /* 4.58 a sajat tintjen */
+  --badge-active-text: #5f6e49;      /* 4.62 */
+  --badge-paused-text: #af4928;      /* 4.64 */
+  /* Memoria-tier: KATEGORIA, nem statusz. Szandekosan tavol a statusz-palettatol,
+     kulonben egy forro emlek hibanak latszik. Teli hatter + feher szoveg, ezert
+     tema-fuggetlen (egy token eleg tierenkent). */
+  --tier-hot: #e32650;
+  --tier-warm: #e03106;
+  --tier-cold: #1a6df4;
+  --tier-shared: #8351f5;
+  /* Semleges teli kitoltes a besorolatlan vagy szerep nelkuli elemeknek. NEM csak
+     tier: recall-jelveny, assignee-pont, ket kanban-avatar es az 1-es autonomia-gomb
+     hasznalja. TEMA-FUGGETLEN, mert feher szoveg all rajta: egy tema-fuggo token
+     (a regi --text-muted) ugyanitt sotet temaban 2.89-re esett. SZ2.
+     Feher szoveggel 5.68 mindket temaban. */
+  --fill-neutral: #68675f;
   --shadow-sm: 0 1px 3px rgba(20, 20, 19, 0.04);
   --shadow-md: 0 4px 16px rgba(20, 20, 19, 0.06);
   --shadow-lg: 0 8px 32px rgba(20, 20, 19, 0.1);
+  /* Betu-lancok. A mono tagjai szerep szerint allnak: JetBrains Mono = kedvezmeny
+     annak, akinek fent van (NEM szallitjuk); ui-monospace = Apple; Consolas =
+     Windows-garancia; DejaVu Sans Mono = Linux-garancia; monospace = vegso tartalek.
+     A ket garancia meglete merve (2026-09-20, Willy). Uj tagot MERNI kell: az ismeretlen
+     betu nem hibazik, hanem csendben helyettesit.
+     A --font-sans SZANDEKOSAN nem szolgalja ki a body-t: a sans oldalon nincs sodrodas
+     (a lanc pontosan egyszer all kiirva), tehat a token ott semmit nem nyerne, viszont
+     az egesz oldal betuje fuggne egyetlen definiciotol. */
+  --font-mono: 'JetBrains Mono', ui-monospace, Consolas, 'DejaVu Sans Mono', monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
   --radius: 12px;
   --radius-sm: 8px;
   --radius-lg: 16px;
@@ -44,9 +84,12 @@
   --bg-code: #262624;
   --text: #faf9f5;
   --text-secondary: #b0aea5;
-  --text-muted: #73726c;
+  --text-muted: var(--text-dim);
   --text-dim: #9a9890;   /* 6.4:1 on --bg. See the light-theme note. */
   --border: #3d3d3a;
+  --badge-heartbeat-text: #ce6487;   /* 4.55 a sotet tinten */
+  --badge-active-text: #7b9060;      /* 4.59 */
+  --badge-paused-text: #d87554;      /* 4.96 */
   --shadow-sm: 0 1px 3px rgba(0,0,0,0.2);
   --shadow-md: 0 4px 16px rgba(0,0,0,0.25);
   --shadow-lg: 0 8px 32px rgba(0,0,0,0.35);
@@ -403,7 +446,7 @@ nav { display: flex; gap: 4px; }
   padding: 2px 6px;
   border-radius: 4px;
   font-size: 12px;
-  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-family: var(--font-mono);
 }
 
 .updates-commits { margin-top: 20px; }
@@ -421,7 +464,7 @@ nav { display: flex; gap: 4px; }
   font-size: 13px;
   color: var(--text-muted);
   margin-bottom: 4px;
-  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-family: var(--font-mono);
 }
 .updates-commit-msg { font-size: 14px; color: var(--text); }
 
@@ -976,7 +1019,7 @@ main {
   background: var(--bg-input);
 }
 .kanban-embedded-seq {
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-muted);
   flex-shrink: 0;
@@ -1044,7 +1087,7 @@ main {
 .assignee-dot.owner { background: var(--accent); }
 .assignee-dot.bot { background: var(--info); }
 .assignee-dot.agent { background: var(--success); }
-.assignee-dot.unknown { background: var(--text-muted); }
+.assignee-dot.unknown { background: var(--fill-neutral); }
 
 .kanban-card-due {
   font-size: 10px;
@@ -1261,10 +1304,10 @@ main {
 .kanban-swimlane-avatar.owner { background: var(--accent); }
 .kanban-swimlane-avatar.bot { background: var(--info); }
 .kanban-swimlane-avatar.agent { background: var(--success); }
-.kanban-swimlane-avatar.unknown { background: var(--text-muted); }
+.kanban-swimlane-avatar.unknown { background: var(--fill-neutral); }
 .kanban-swimlane-avatar.priority-urgent { background: var(--danger); }
 .kanban-swimlane-avatar.priority-high { background: var(--accent); }
-.kanban-swimlane-avatar.priority-normal { background: var(--text-muted); }
+.kanban-swimlane-avatar.priority-normal { background: var(--fill-neutral); }
 .kanban-swimlane-avatar.priority-low { background: var(--border); }
 .kanban-swimlane-name {
   font-weight: 600;
@@ -1448,7 +1491,7 @@ main {
   resize: vertical;
   transition: all var(--transition);
 }
-.comment-form textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.comment-form textarea:focus { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-soft); }
 
 .comment-author-select {
   padding: 6px 10px;
@@ -1689,7 +1732,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   border-color: var(--accent);
 }
 .tmux-copy-btn:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--border-focus);
   outline-offset: 1px;
 }
 .tmux-copy-btn.copied {
@@ -1783,7 +1826,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 .process-uptime {
   font-size: 12px;
   color: var(--text-muted);
-  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-family: var(--font-mono);
 }
 .process-actions {
   display: flex;
@@ -1879,7 +1922,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   background: var(--bg-code);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.6;
   color: var(--text);
@@ -1888,7 +1931,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   transition: border-color var(--transition), box-shadow var(--transition);
 }
 .code-textarea:focus {
-  border-color: var(--accent);
+  border-color: var(--border-focus);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
@@ -2059,7 +2102,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   font-size: 13px;
 }
 .tg-pending-code {
-  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-family: var(--font-mono);
   font-weight: 600;
   color: var(--accent);
 }
@@ -2118,7 +2161,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   color: rgb(40, 170, 130);
 }
 .tg-allowed-id {
-  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text);
 }
@@ -2508,7 +2551,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 .form-group input:focus,
 .form-group textarea:focus,
 .form-group select:focus {
-  border-color: var(--accent);
+  border-color: var(--border-focus);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .form-group textarea { resize: vertical; }
@@ -2626,7 +2669,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 16px;
-  font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.6;
   overflow-x: auto;
@@ -2724,15 +2767,15 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 }
 .badge-active {
   background: var(--success-soft);
-  color: var(--success);
+  color: var(--badge-active-text);
 }
 .badge-paused {
-  background: rgba(217, 119, 87, 0.12);
-  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--badge-paused-text);
 }
 .badge-heartbeat {
-  background: rgba(200, 80, 120, 0.12);
-  color: #c85078;
+  background: color-mix(in srgb, var(--badge-heartbeat) 12%, transparent);
+  color: var(--badge-heartbeat-text);
 }
 
 .task-info {
@@ -2758,7 +2801,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 }
 
 .task-schedule-cron {
-  font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-family: var(--font-mono);
   background: var(--bg-input);
   padding: 1px 6px;
   border-radius: 4px;
@@ -3029,7 +3072,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   transition: all var(--transition);
 }
 .mem-search:focus {
-  border-color: var(--accent);
+  border-color: var(--border-focus);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
@@ -3193,7 +3236,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   padding: 4px 10px;
   font-size: 11px;
   color: var(--text-muted);
-  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-family: var(--font-mono);
   z-index: 5;
   pointer-events: none;
   opacity: 0;
@@ -3219,10 +3262,10 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 }
 
 /* === Tier Badges === */
-.badge-hot { background: rgba(220, 60, 60, 0.12); color: #dc3c3c; }
-.badge-warm { background: rgba(217, 119, 87, 0.12); color: var(--accent); }
-.badge-cold { background: var(--info-soft); color: var(--info); }
-.badge-shared { background: rgba(200, 180, 100, 0.18); color: #9a8a30; }
+.badge-hot { background: var(--tier-hot); color: #fff; }
+.badge-warm { background: var(--tier-warm); color: #fff; }
+.badge-cold { background: var(--tier-cold); color: #fff; }
+.badge-shared { background: var(--tier-shared); color: #fff; }
 
 .mem-agent-badge {
   font-size: 10px;
@@ -3247,7 +3290,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   border: 1px solid var(--border);
   border-radius: 3px;
   color: var(--text-muted);
-  font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono);
 }
 
 /* === Memory List === */
@@ -3289,7 +3332,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   font-size: 11px;
   color: var(--text-muted);
   margin-left: auto;
-  font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono);
 }
 
 .mem-content-short,
@@ -3378,7 +3421,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   font-size: 12px;
   font-weight: 600;
   color: var(--accent);
-  font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono);
   white-space: nowrap;
   padding-top: 2px;
 }
@@ -3549,7 +3592,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   gap: 10px;
 }
 .schedule-cron {
-  font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-family: var(--font-mono);
   background: var(--bg-input);
   padding: 1px 6px;
   border-radius: 4px;
@@ -3881,7 +3924,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   font-size: 9px;
   color: var(--text-muted);
   transform: translateY(-50%);
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
 }
 
 .week-day-empty {
@@ -3931,7 +3974,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   font-size: 10px;
   font-weight: 600;
   color: var(--accent);
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
 }
 .week-task-name {
   font-size: 10px;
@@ -3981,7 +4024,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   transition: border-color var(--transition), box-shadow var(--transition);
 }
 .recall-search:focus {
-  border-color: var(--accent);
+  border-color: var(--border-focus);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .recall-date-wrap {
@@ -4010,7 +4053,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   color-scheme: dark;
 }
 .recall-date:focus {
-  border-color: var(--accent);
+  border-color: var(--border-focus);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .recall-expr {
@@ -4027,7 +4070,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   transition: border-color var(--transition), box-shadow var(--transition);
 }
 .recall-expr:focus {
-  border-color: var(--accent);
+  border-color: var(--border-focus);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .recall-expr::placeholder,
@@ -4047,7 +4090,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   min-width: 130px;
 }
 .recall-agent-filter:focus {
-  border-color: var(--accent);
+  border-color: var(--border-focus);
 }
 .recall-summary {
   margin-bottom: 16px;
@@ -4091,10 +4134,10 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 .recall-memory {
   border-left: 3px solid var(--border);
 }
-.recall-memory[data-cat="hot"]    { border-left-color: #ef4444; }
-.recall-memory[data-cat="warm"]   { border-left-color: #f59e0b; }
-.recall-memory[data-cat="cold"]   { border-left-color: #3b82f6; }
-.recall-memory[data-cat="shared"] { border-left-color: #8b5cf6; }
+.recall-memory[data-cat="hot"]    { border-left-color: var(--tier-hot); }
+.recall-memory[data-cat="warm"]   { border-left-color: var(--tier-warm); }
+.recall-memory[data-cat="cold"]   { border-left-color: var(--tier-cold); }
+.recall-memory[data-cat="shared"] { border-left-color: var(--tier-shared); }
 .recall-item-header {
   display: flex;
   justify-content: space-between;
@@ -4116,11 +4159,11 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   white-space: nowrap;
 }
 .recall-badge-agent { background: var(--accent); }
-.recall-badge-cat { background: var(--text-muted); }
-.recall-badge-cat[data-cat="hot"]    { background: #ef4444; }
-.recall-badge-cat[data-cat="warm"]   { background: #f59e0b; }
-.recall-badge-cat[data-cat="cold"]   { background: #3b82f6; }
-.recall-badge-cat[data-cat="shared"] { background: #8b5cf6; }
+.recall-badge-cat { background: var(--fill-neutral); }
+.recall-badge-cat[data-cat="hot"]    { background: var(--tier-hot); }
+.recall-badge-cat[data-cat="warm"]   { background: var(--tier-warm); }
+.recall-badge-cat[data-cat="cold"]   { background: var(--tier-cold); }
+.recall-badge-cat[data-cat="shared"] { background: var(--tier-shared); }
 .recall-item-content {
   white-space: pre-wrap;
   font-size: 13px;
@@ -4221,7 +4264,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   border-radius: var(--radius-sm);
   margin-bottom: 4px;
   font-size: 13px;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 .connector-external-item button {
   background: none;
@@ -4361,7 +4404,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   outline: none;
   transition: border-color var(--transition);
 }
-.vault-search:focus { border-color: var(--accent); }
+.vault-search:focus { border-color: var(--border-focus); }
 .vault-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
@@ -4403,7 +4446,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   min-width: 0;
 }
 .vault-card-id {
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 14px;
   font-weight: 600;
   color: var(--text);
@@ -4431,7 +4474,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   word-break: break-all;
   animation: slideDown 0.15s ease;
@@ -4636,7 +4679,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   color: var(--text-muted);
 }
 .ssh-card-row svg { flex-shrink: 0; opacity: 0.6; }
-.ssh-card-row span { color: var(--text); font-family: monospace; font-size: 12px; }
+.ssh-card-row span { color: var(--text); font-family: var(--font-mono); font-size: 12px; }
 .ssh-card-footer {
   display: flex;
   align-items: center;
@@ -4677,7 +4720,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 .ssh-table tr:last-child td { border-bottom: none; }
 .ssh-table tbody tr:hover { background: var(--bg-hover, rgba(127,127,127,.05)); }
 .ssh-table .ssh-table-name { font-weight: 600; }
-.ssh-table .ssh-table-mono { font-family: monospace; font-size: 12px; color: var(--text-muted); }
+.ssh-table .ssh-table-mono { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); }
 .ssh-table .ssh-table-actions { display: flex; gap: 4px; justify-content: flex-end; }
 
 @media (max-width: 600px) {
@@ -4699,7 +4742,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 }
 .ssh-pubkey-box {
   width: 100%;
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   padding: 10px 12px;
   background: var(--bg-card);
@@ -4735,7 +4778,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 }
 .ssh-code {
   flex: 1;
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text);
   word-break: break-all;
@@ -4831,7 +4874,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 .vault-scan-env {
   font-size: 12px;
   color: var(--text-muted);
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 .vault-scan-env code {
   background: var(--bg);
@@ -4906,7 +4949,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 .env-var-label {
   font-size: 12px;
   font-weight: 600;
-  font-family: monospace;
+  font-family: var(--font-mono);
   color: var(--text);
 }
 .env-var-input { width: 100%; }
@@ -4960,7 +5003,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   text-decoration: underline;
 }
 .connector-builtin-action.btn-link:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--border-focus);
   outline-offset: 1px;
 }
 
@@ -4975,7 +5018,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   background: var(--bg-input);
   padding: 1px 5px;
   border-radius: 3px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 0.92em;
 }
 
@@ -5345,7 +5388,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   font-weight: 600;
   color: var(--text-secondary);
   margin-bottom: 4px;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 .catalog-env-group input {
   width: 100%;
@@ -5429,7 +5472,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   margin-left: auto;
   font-size: 11px;
   color: var(--text-muted);
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
 }
 
 .status-incidents h3 {
@@ -5544,7 +5587,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 .migrate-finding-size {
   font-size: 11px;
   color: var(--text-muted);
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
 }
 
 .migrate-summary {
@@ -5624,7 +5667,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 }
 
 .skills-search:focus {
-  border-color: var(--accent);
+  border-color: var(--border-focus);
 }
 
 .skills-filter-btns {
@@ -5721,7 +5764,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   border: 1px solid var(--accent);
   border-radius: var(--radius-sm);
   padding: 16px;
-  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.6;
   color: var(--text-secondary);
@@ -5739,7 +5782,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 
 .skill-detail-rendered {
   white-space: normal;
-  font-family: var(--font-sans, inherit);
+  font-family: var(--font-sans);
   font-size: 13px;
   line-height: 1.6;
   max-height: 400px;
@@ -5754,7 +5797,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 .skill-detail-rendered ul { margin: 6px 0 6px 18px; padding: 0; }
 .skill-detail-rendered li { margin: 2px 0; }
 .skill-detail-rendered pre { background: var(--bg-input); border-radius: var(--radius-sm); padding: 10px 14px; overflow-x: auto; margin: 8px 0; }
-.skill-detail-rendered code { font-family: 'SF Mono','Fira Code',monospace; font-size: 12px; }
+.skill-detail-rendered code { font-family: var(--font-mono); font-size: 12px; }
 .skill-detail-rendered pre code { color: var(--text-secondary); }
 .skill-detail-rendered :not(pre) > code { background: var(--bg-input); padding: 1px 5px; border-radius: 3px; color: var(--accent); }
 .skill-detail-rendered a { color: var(--accent); text-decoration: underline; }
@@ -5764,7 +5807,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 
 /* Shared marker class for all renderMarkdown() output containers.
    Context-specific sizing lives in .skill-detail-rendered / .markdown-body. */
-.md-rendered code { font-family: 'SF Mono','Fira Code',ui-monospace,Menlo,monospace; }
+.md-rendered code { font-family: var(--font-mono); }
 .md-rendered pre code { background: none; padding: 0; }
 .md-rendered :not(pre) > code { border-radius: 3px; padding: 1px 5px; }
 
@@ -6059,7 +6102,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 16px;
-  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.6;
   color: var(--text-secondary);
@@ -6234,7 +6277,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   box-shadow: var(--shadow-sm);
 }
 .autonomy-level-btn.active[data-level="1"] {
-  background: var(--text-muted);
+  background: var(--fill-neutral);
 }
 .autonomy-level-btn.active[data-level="2"] {
   background: var(--accent);
@@ -6278,7 +6321,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   font-size: 13px;
   font-weight: 600;
   color: var(--text);
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -6353,7 +6396,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   font-size: 12px;
   color: var(--text-muted);
   margin-top: 4px;
-  font-family: var(--font-mono, monospace);
+  font-family: var(--font-mono);
 }
 .claude-plan-active-dot {
   width: 8px;
@@ -6708,7 +6751,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   .act-orb::before { animation: none; }
 }
 .activity-tail {
-  margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+  margin: 0; font-family: var(--font-mono); font-size: 11px;
   line-height: 1.45; color: var(--text-muted); white-space: pre-wrap; word-break: break-word;
   max-height: clamp(200px, 28vh, 480px); overflow: auto;
   background: var(--bg-subtle, rgba(127,127,127,0.06));
@@ -6841,7 +6884,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   background: rgba(255,255,255,0.2);
   border-radius: 4px;
   padding: 1px 5px;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 .bubble-out .bubble-id-chip { background: rgba(255,255,255,0.25); color: #fff; }
 .bubble-in .bubble-id-chip { background: var(--bg-hover); color: var(--text-muted); }
@@ -6871,7 +6914,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   width: 100%;
   box-sizing: border-box;
 }
-.chat-compose-input:focus { outline: none; border-color: var(--accent); }
+.chat-compose-input:focus { outline: none; border-color: var(--border-focus); }
 .chat-send-btn {
   height: 38px !important;
   width: auto !important;
@@ -7015,7 +7058,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   padding: 0.12em 0.4em;
   border-radius: 4px;
   font-size: 0.9em;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
 }
 .markdown-body pre {
   background: var(--surface-2, rgba(127,127,127,0.12));
@@ -7095,7 +7138,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 .conv-row.conv-note { justify-content: center; }
 .conv-note-text { font-size: 12px; color: var(--text-dim); font-style: italic; max-width: 88%; }
 .conv-row.conv-action { justify-content: flex-start; }
-.conv-action-text { font-size: 11.5px; color: var(--text-dim); font-family: 'JetBrains Mono', monospace; display: flex; gap: 8px; align-items: baseline; }
+.conv-action-text { font-size: 11.5px; color: var(--text-dim); font-family: var(--font-mono); display: flex; gap: 8px; align-items: baseline; }
 /* No second dimming step here: nesting one opacity inside another is what took
    the timestamp to 1.97:1. It is separated by size, not by fading. */
 .conv-action-ts { font-size: 10px; }
@@ -7148,7 +7191,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 .naplo-ts { color: var(--text-muted); font-size: 12px; white-space: nowrap; }
 .naplo-badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; color: #fff; white-space: nowrap; }
 .naplo-entry-detail { color: var(--text); line-height: 1.5; }
-.naplo-entry-detail code { background: var(--bg, #f5f5f5); padding: 1px 5px; border-radius: 3px; font-family: monospace; font-size: 12px; }
+.naplo-entry-detail code { background: var(--bg, #f5f5f5); padding: 1px 5px; border-radius: 3px; font-family: var(--font-mono); font-size: 12px; }
 .naplo-actor { color: var(--text-muted); font-size: 12px; }
 .naplo-note { font-style: italic; color: var(--text-muted); }
 .naplo-event-type { font-size: 11px; background: var(--bg); border-radius: 3px; padding: 1px 5px; color: var(--text-muted); }
@@ -7605,7 +7648,7 @@ body {
 .auth-device-row .auth-device-revoke { margin-left: auto; flex-shrink: 0; }
 .auth-device-mint { margin-top: 10px; }
 .auth-device-minted-row { flex-direction: row; max-width: none; }
-.auth-device-minted-row input { flex: 1; font-family: var(--mono, monospace); font-size: 12px; }
+.auth-device-minted-row input { flex: 1; font-family: var(--font-mono); font-size: 12px; }
 .auth-device-warn { margin-bottom: 8px; }
 .auth-device-bridge-badge {
   font-size: 10px;
@@ -7689,4 +7732,34 @@ body {
   color: #b45309;
   background: color-mix(in srgb, #f59e0b 18%, transparent);
   border: 1px solid color-mix(in srgb, #f59e0b 45%, transparent);
+}
+
+/* WCAG 2.4.7 (Focus Visible), merve 2026-09-21. Ezen a negy elemen `outline: none`
+   all az alapszabalyban es NEM volt hozzajuk :focus szabaly, tehat billentyuzettel a
+   fokusz lathatatlan volt rajtuk. Outline es nem border-color: kivul rajzolodik, nem a
+   --bg-input a szomszedja, es nem tolja el az elrendezest (ugyanez a mintazat: 1692, 4963). */
+.comment-author-select:focus-visible,
+.mem-agent-filter:focus-visible,
+.mem-search-mode:focus-visible,
+.skill-detail-editor:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+/* ALAP FOKUSZ-GYURU MINDEN GOMBRA (Willy render-lelete, 2026-09-21).
+   A .btn-primary-nek nem volt sajat fokusz-szabalya, es mivel a szabalya
+   color: var(--bg), a bongeszo alapertelmezett gyuruje a currentColor-t vette
+   fel: VILAGOS TEMABAN a gyuru szine PONTOSAN a lap hattere lett (1,00 kontraszt),
+   vagyis a fokuszalt gomb jelolese lathatatlan volt.
+   Miert ELEM-szelektor es nem osztaly-lista: a jelolesben 349 <button> all es
+   mindossze 2 a.btn, tehat az elem-alak gyakorlatilag mindent lefed, a kesobb
+   hozzaadott gombokat is. A specificitasa (0,1,1) alacsonyabb, mint a meglevo
+   osztaly-alapu fokusz-szabalyoke, tehat azokat NEM irja felul.
+   Miert nem talalta meg az A szakasz auditja: az az "outline: none"-t kereste,
+   ezek az elemek viszont SOHA nem kaptak fokusz-szabalyt. Szamolni csak arrol
+   lehet, amirol van szabaly -- ezt a leletet render mutatta meg. */
+button:focus-visible,
+a.btn:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
 }

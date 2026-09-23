@@ -22,10 +22,44 @@ DEST="$BKDIR/${TS}-${LABEL}"
 mkdir -p "$DEST"
 
 # Consistent SQLite snapshot (NOT a raw cp -- the live dashboard may be mid-write).
+#
+# BACKUPVAK918: this used to call the sqlite3 CLI and, on failure, print a
+# warning and carry on -- so on a machine without that CLI the backup completed
+# "successfully" with NO DATABASE IN IT. A backup you only discover is empty
+# when you need it is worse than no backup. python3 is a hard install
+# dependency and its sqlite3 module does the same online .backup, so it is the
+# fallback rather than a second way to fail. If BOTH are missing the script now
+# EXITS NON-ZERO: refusing to produce a backup is the honest outcome.
 if [ -f "$STORE/claudeclaw.db" ]; then
-  sqlite3 "$STORE/claudeclaw.db" ".backup '$DEST/claudeclaw.db'" \
-    && echo "  db: consistent snapshot ok" \
-    || echo "  db: WARNING snapshot failed"
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$STORE/claudeclaw.db" ".backup '$DEST/claudeclaw.db'" \
+      && echo "  db: consistent snapshot ok (sqlite3)" \
+      || { echo "  db: ERROR sqlite3 snapshot failed"; exit 1; }
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 - "$STORE/claudeclaw.db" "$DEST/claudeclaw.db" <<'PY' \
+      && echo "  db: consistent snapshot ok (python3)" \
+      || { echo "  db: ERROR python3 snapshot failed"; exit 1; }
+import sqlite3, sys
+src, dst = sys.argv[1], sys.argv[2]
+with sqlite3.connect(src) as s, sqlite3.connect(dst) as d:
+    s.backup(d)
+PY
+  else
+    echo "  db: ERROR no sqlite3 CLI and no python3 -- cannot snapshot the database"
+    exit 1
+  fi
+  # Prove the copy is readable, not merely present: a 0-byte or truncated file
+  # would otherwise pass as a backup.
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$DEST/claudeclaw.db" <<'PY' || { echo "  db: ERROR snapshot is not a readable database"; exit 1; }
+import sqlite3, sys
+n = sqlite3.connect(sys.argv[1]).execute(
+    "select count(*) from sqlite_master where type='table'").fetchone()[0]
+if n == 0:
+    raise SystemExit("no tables in the snapshot")
+print(f"  db: snapshot verified, {n} tables")
+PY
+  fi
 fi
 
 # Small critical state git does not track. Explicit list -- store/ also holds

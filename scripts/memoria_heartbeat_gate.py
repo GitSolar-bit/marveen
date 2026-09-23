@@ -144,7 +144,32 @@ TOKEN_FILE = MARVEEN_DIR / "store" / ".dashboard-token"
 MARKER_FILE = MARVEEN_DIR / "store" / "memoria-heartbeat-gate-last.txt"
 MESSAGES_URL = "http://localhost:3420/api/messages"
 
-AGENT = "picard"
+def main_agent_id() -> str:
+    """The installation's own main-agent id, read at call time.
+
+    BEEGETETT913: this used to be a hardcoded agent name from the upstream
+    install. A name that does not exist here is not a loud failure -- the
+    dashboard accepts the POST and the message lands in a mailbox nobody
+    reads, so the alert is lost exactly when it matters. The .env is the
+    authority; the fallback is only for a stripped-down checkout.
+    """
+    env = MARVEEN_DIR / ".env"
+    try:
+        for line in env.read_text(encoding="utf-8").splitlines():
+            if line.startswith("MAIN_AGENT_ID="):
+                value = line.split("=", 1)[1].strip().strip("\"'")
+                if value:
+                    return value
+    except OSError:
+        pass
+    return "hex"
+
+
+# Resolved once at import: AGENT is not only the message recipient, it is
+# also the SQL filter in the activity queries below. A None here does not
+# fail -- it silently matches no rows, so the gate would report "no
+# activity" forever. Caught by scripts/test_memoria_heartbeat_gate.py.
+AGENT = main_agent_id()
 
 # The agent's own `--mark-seen` call is logged by the PostToolUse hook AFTER
 # this script has read the maximum, so the marker can never cover it and the
@@ -271,7 +296,7 @@ def wake_agent(seen: dict[str, int], maxima: dict[str, int]) -> None:
         tool_max=maxima["tool_call_log"],
         tool_new=count_new(seen["tool_call_log"], "tool_call_log"),
     )
-    payload = json.dumps({"from": "geordi", "to": AGENT, "content": content}).encode()
+    payload = json.dumps({"from": "memoria-gate", "to": AGENT, "content": content}).encode()
     req = urllib.request.Request(
         MESSAGES_URL,
         data=payload,
