@@ -1789,17 +1789,58 @@ const SKILLS_TRAP_BLOCK_RE = new RegExp(
   `${SKILLS_TRAP_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${SKILLS_TRAP_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
 )
 
-function buildSkillsPathTrapBody(): string {
-  return [
+// SKILLGYOKERLATSZIK923: the body used to be ONE text for everybody, and it was
+// wrong for the main agent in the direction that matters. It said "your own,
+// private skill goes in your working directory's .claude/skills" -- true for a
+// sub-agent, whose cwd is agents/<name>, but the MAIN agent's cwd IS the project
+// root, and every sub-agent's cwd sits UNDER it. That directory is therefore
+// their ancestor: the main agent's 30 "private" skills are visible to the whole
+// fleet. Measured 2026-09-23 -- HEX told Igor a new skill was private, Igor
+// measured it and showed he was already reading it. So the body is now
+// per-agent: the same three locations, described from the reader's own position.
+// (The old text also warned about `.claude-config/skills`, a path that does not
+// exist at the project root at all; only sub-agents and the ~/.hex-worker roots
+// have it. The main agent's isolated root is named .channels-config.)
+function buildSkillsPathTrapBody(name: string): string {
+  const isMain = name === MAIN_AGENT_ID
+  const shared = [
     '## Skill-útvonal csapda (KÖTELEZŐ elolvasni skill-írás előtt)',
     '',
-    'A `.claude-config/skills` NEM a saját mappád: symlink a globális',
-    '`~/.claude/skills`-re, tehát ami oda kerül, az a TELJES flottánál megjelenik',
-    '-- akkor is, ha a skill-futtatás base directory-ja ezt az utat mutatja.',
-    'A saját, csak neked szóló vagy kipróbálatlan külső skill a munkakönyvtárad',
-    '`.claude/skills/` mappájába megy. A globálisba írás tudatos, flotta-szintű',
-    'döntés legyen, ne alapértelmezés.',
-  ].join('\n')
+    'HÁROM hely van, nem kettő, és a különbség nem az, hogy melyik "globális",',
+    'hanem hogy KI LÁTJA.',
+    '',
+    '1. `~/.claude/skills` -- a globális. MINDEN ágens látja. Ide írni tudatos,',
+    '   flotta-szintű döntés legyen, ne alapértelmezés. Minden izolált',
+    '   config-gyökér `skills` bejegyzése ide mutató symlink, és a skill-futtatás',
+    '   base directory-ja is ezt az utat MUTATHATJA -- attól még a flottáé.',
+  ]
+  const perAgent = isMain
+    ? [
+        '2. A PROJEKT-GYÖKÉR `.claude/skills` mappája. **EZ NEKED NEM PRIVÁT.**',
+        '   A munkakönyvtárad MAGA a projekt gyökere, a sub-ágenseké pedig',
+        '   (`agents/<név>`) ezen BELÜL van, tehát ez a mappa az ŐSÜK: amit ide',
+        '   írsz, az megjelenik a listájukban. Láthatóságban úgy viselkedik,',
+        '   mint a globális.',
+        '3. `agents/<név>/.claude/skills` -- egy SUB-ÁGENS saját mappája. Csak övé.',
+        '   NEKED NINCS ilyen: az `agents/<sajat-neved>` mappa nem létezik, és egy',
+        '   ott létrehozott mappa a te munkakönyvtárad GYEREKE lenne, nem az őse,',
+        '   tehát te magad sem látnád.',
+        '',
+        'KÖVETKEZMÉNY: ezen a telepítésen NINCS olyan hely, ahova a fő ágens',
+        'csak-magának írhat skillt. Ne feltételezd, hogy privát -- 2026-09-23-án',
+        'ez a feltételezés dőlt meg, és nem magától: egy sub-ágens mérte meg.',
+      ]
+    : [
+        '2. A PROJEKT-GYÖKÉR `.claude/skills` mappája. A munkakönyvtárad EZEN BELÜL',
+        '   van, tehát ez a mappa az ŐSÖD: az itt álló skilleket LÁTOD, akkor is,',
+        '   ha nem te írtad és nem neked szólnak. Ide te NE írj: ez a fő ágens',
+        '   területe, és amit ide tennél, azt a többi ágens is látná.',
+        '3. A saját `.claude/skills` mappád a munkakönyvtáradban',
+        '   (`agents/<a-te-neved>/.claude/skills`). EZ az egyetlen, ami tényleg',
+        '   csak a tiéd. A saját, csak neked szóló vagy kipróbálatlan külső skill',
+        '   ide megy.',
+      ]
+  return [...shared, ...perAgent].join('\n')
 }
 
 // Same five-rule idempotency contract as ensureFleetRosterSection /
@@ -1811,7 +1852,7 @@ export function ensureSkillsPathTrapSection(name: string): void {
     : join(agentDir(name), 'CLAUDE.md')
   if (!existsSync(claudeMdPath)) return
 
-  const block = `${SKILLS_TRAP_BEGIN}\n${buildSkillsPathTrapBody()}\n${SKILLS_TRAP_END}`
+  const block = `${SKILLS_TRAP_BEGIN}\n${buildSkillsPathTrapBody(name)}\n${SKILLS_TRAP_END}`
 
   let existing: string
   try {
