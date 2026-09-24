@@ -70,9 +70,15 @@ ok "  ...and NOTHING was sent" "$([ "$CALLED" = "no" ] && echo 0 || echo 1)" "cu
 ok "  ...and the refusal names the letter" "$(printf '%s' "$ERR" | grep -qi 'CYRILLIC' && echo 0 || echo 1)" "stderr: $ERR"
 # The message must steer to the right fix, or the next person reaches for the
 # override and the gate ends up switched off.
-ok "  ...and it steers away from the override, not toward it" \
-   "$(printf '%s' "$ERR" | grep -q 'NE masold at' && printf '%s' "$ERR" | grep -q 'nem elso' && echo 0 || echo 1)" \
+ok "  ...and it names the word to rewrite instead of offering a cleaner" \
+   "$(printf '%s' "$ERR" | grep -q 'ird UJRA' && printf '%s' "$ERR" | grep -q 'Automatikus csere nincs' && echo 0 || echo 1)" \
    "stderr: $ERR"
+# The report must not CARRY the contaminated form: a report that quotes it is
+# itself contaminated, becomes the next scan's hit, and whoever "fixes" the
+# report deletes the evidence. Same masking as src/homoglyph.ts.
+ok "  ...and the report masks the letter instead of pasting it" \
+   "$(printf '%s' "$ERR" | python3 -c 'import sys,unicodedata; t=sys.stdin.read(); sys.exit(1 if [c for c in t if ord(c)>127 and "CYRILLIC" in unicodedata.name(c,"")] else 0)' && echo 0 || echo 1)" \
+   "stderr carries the raw Cyrillic letter: $ERR"
 
 # STDIN form takes the same route -- it is the form used for long messages.
 : > "$SANDBOX/calls.txt"
@@ -80,32 +86,111 @@ OUT="$(printf 'stdin sz%sveg' "$CY" | env PATH="$BIN:$PATH" CURL_CALLS="$SANDBOX
         MARVEEN_TOKEN_FILE="$SANDBOX/token" /bin/bash "$HELPER" igor hex - 2>/dev/null)"
 ok "the STDIN form is gated too" "$([ "$?" = "3" ] && [ ! -s "$SANDBOX/calls.txt" ] && echo 0 || echo 1)"
 
-# TISZTIT=1 cleans and sends -- and the payload that leaves must be clean.
+# --- THE RULE IS THE MIXED-SCRIPT WORD, not the presence of a script --------
+# Requested in the 2026-09-24 review: this gate refused a plain Russian quote
+# and a standalone Greek symbol that the outgoing-copy hook (#1509) passes.
+# Two gates disagreeing about what is legitimate teach the sender that the rule
+# depends on which script they happened to call.
+ENVX= send "Idezet oroszul: Идёт дождь -- ennyi"
+ok "a pure foreign-language quote is SENT (not a mixed word)" \
+   "$([ "$RC" = "0" ] && [ "$CALLED" = "yes" ] && echo 0 || echo 1)" "rc=$RC curl-called=$CALLED err: $ERR"
+ENVX= send "A kesleltetes Δ = 12 ms volt"
+ok "a standalone Greek symbol is SENT (technical notation)" \
+   "$([ "$RC" = "0" ] && [ "$CALLED" = "yes" ] && echo 0 || echo 1)" "rc=$RC curl-called=$CALLED err: $ERR"
+# ...but Greek INSIDE a Latin word is still the bug this gate exists for.
+GR="$(python3 -c 'print(chr(0x3BF))')"   # GREEK SMALL LETTER OMICRON
+ENVX= send "gorog hom${GR}glifa egy szoban"
+ok "Greek mixed INTO a Latin word is refused" "$([ "$RC" = "3" ] && [ "$CALLED" = "no" ] && echo 0 || echo 1)" "rc=$RC"
+ok "  ...and the refusal names GREEK" "$(printf '%s' "$ERR" | grep -qi 'GREEK' && echo 0 || echo 1)" "stderr: $ERR"
+
+# --- THE TWO PATHS MUST NOT DRIFT -------------------------------------------
+# The anti-drift guarantee is not "we copied the rule carefully", it is this
+# measurement: one corpus, both implementations, identical verdicts. The rule
+# now lives in scripts/lib/mixed_script.py and both import it; if anyone
+# re-implements either side, this check is what fails.
+cat > "$SANDBOX/parity.py" <<'PYP'
+import os
+import subprocess
+import sys
+
+root = sys.argv[1]
+sys.path.insert(0, os.path.join(root, "scripts", "lib"))
+from mixed_script import mixed_script_words
+
+CY, GR = chr(0x43E), chr(0x3BF)
+corpus = [
+    "tiszta magyar szoveg", "arvizturo tukorfurogep", "plain ascii text",
+    "emoji is fine \U0001F600", "Idezet: \u0418\u0434\u0451\u0442 \u0434\u043e\u0436\u0434\u044c",
+    "Delta: \u0394 = 12 ms", "\u03c0 r^2",
+    "szennyezett sz%sveg" % CY, "hom%sglifa" % GR, "MIXED%sCASE" % CY.upper(),
+    "url https://example.com/a?b=1", "szam 12345 es -- kotojel",
+    "kev%srt sz%s egyben" % (CY, GR),
+]
+bad = 0
+for text in corpus:
+    hook = bool(mixed_script_words(text))
+    rc = subprocess.run(
+        [sys.executable, os.path.join(root, "scripts", "lib", "homoglyph.py")],
+        input=text, capture_output=True, text=True).returncode
+    gate = (rc == 3)
+    if hook != gate:
+        sys.stderr.write("DRIFT on %r: hook=%s gate=%s\n" % (text, hook, gate))
+        bad += 1
+sys.exit(1 if bad else 0)
+PYP
+PARITY=0
+PARITY_ERR="$(python3 "$SANDBOX/parity.py" "$ROOT" 2>&1 >/dev/null)" || PARITY=1
+ok "the send gate and the outgoing-copy hook agree on the whole corpus" "$PARITY" "$PARITY_ERR"
+
+# --- THE AUTOMATIC REPLACEMENT IS GONE, AND MUST STAY GONE ------------------
+# Dropped on the reviewer's request, and it is a decision, not a missing
+# feature: a look-alike maps by SHAPE, while the intended word often needs a
+# different letter (Cyrillic ER looks like `p`, the word wanted `r`), and the
+# old table mixed shape-based with sound-based mappings. So the old override
+# must not quietly still work -- someone with TISZTIT=1 in their muscle memory
+# has to get the refusal, not a silently rewritten message.
 ENVX="TISZTIT=1" send "tisztitando sz${CY}veg"
-ok "TISZTIT=1 sends the CLEANED text" "$([ "$RC" = "0" ] && [ "$CALLED" = "yes" ] && echo 0 || echo 1)" "rc=$RC"
-# The recorded arguments must be DECODED before looking for the letter.
-# json.dumps escapes it to \u043e, i.e. plain ASCII -- a raw scan of the
-# recorded text finds nothing and the assertion passes on a body that still
-# carries it. Measured: this check was GREEN against the ungated helper until
-# the decode was added.
-ok "  ...and no Cyrillic letter reaches the payload" \
+ok "TISZTIT=1 no longer cleans: the text is still REFUSED" \
+   "$([ "$RC" = "3" ] && [ "$CALLED" = "no" ] && echo 0 || echo 1)" "rc=$RC curl-called=$CALLED"
+
+# --- A BROKEN CHECKER IS NOT A VERDICT ON THE TEXT --------------------------
+# Measured in the review: a checker exiting 0 with EMPTY stdout made this
+# helper send an EMPTY message and report OK, because the helper took the
+# checker's stdout as the payload. The exit code is the verdict; the text that
+# goes out is the text the sender typed.
+cat > "$SANDBOX/empty-checker.py" <<'EC'
+import sys
+sys.stdin.read()
+sys.exit(0)
+EC
+ENVX="MARVEEN_HOMOGLYPH_BIN=$SANDBOX/empty-checker.py" send "ezt a szoveget kell elkuldeni"
+ok "a checker with empty stdout does NOT empty the message" \
+   "$([ "$RC" = "0" ] && [ "$CALLED" = "yes" ] && echo 0 || echo 1)" "rc=$RC"
+ok "  ...the ORIGINAL text reaches the payload" \
    "$(python3 -c "
-import json, sys, unicodedata
-args = open('$SANDBOX/calls.txt', encoding='utf-8').read().splitlines()
-sent = ''
-for a in args:
+import json, sys
+sent = None
+for a in open('$SANDBOX/calls.txt', encoding='utf-8').read().splitlines():
     try:
         d = json.loads(a)
     except Exception:
         continue
     if isinstance(d, dict) and 'content' in d:
         sent = d['content']
-if not sent:
-    sys.stderr.write('no JSON body was recorded')
-    sys.exit(1)
-bad = [c for c in sent if ord(c) > 127 and 'CYRILLIC' in unicodedata.name(c, '')]
-sys.exit(1 if bad else 0)
-" && echo 0 || echo 1)" "the decoded body still carries a Cyrillic letter"
+sys.exit(0 if sent == 'ezt a szoveget kell elkuldeni' else 1)
+" && echo 0 || echo 1)" "the payload was not the text that was typed"
+
+# A CRASHING checker must get its own message and its own exit code: "refused"
+# would send the author off to rewrite a word that may be perfectly fine.
+cat > "$SANDBOX/crash-checker.py" <<'CC'
+import sys
+raise SystemExit(9)
+CC
+ENVX="MARVEEN_HOMOGLYPH_BIN=$SANDBOX/crash-checker.py" send "tiszta szoveg torott checkerrel"
+ok "a CRASHING checker is not reported as a refusal" \
+   "$([ "$RC" = "4" ] && [ "$CALLED" = "no" ] && echo 0 || echo 1)" "rc=$RC (expected 4) curl-called=$CALLED"
+ok "  ...and it says the checker crashed, not that the text was refused" \
+   "$(printf '%s' "$ERR" | grep -q 'CRASHED' && echo 0 || echo 1)" "stderr: $ERR"
 
 # A missing checker must FAIL OPEN -- this helper is the fleet's mandated route,
 # and blocking every message on an install without the lib file would be a new,

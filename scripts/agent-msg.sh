@@ -26,9 +26,6 @@
 #   MARVEEN_WEB_PORT   port for the default localhost base (default 3420)
 #   MARVEEN_TOKEN_FILE bearer token file (default <repo>/store/.dashboard-token)
 #   MARVEEN_HOMOGLYPH_BIN  the checker (default <repo>/scripts/lib/homoglyph.py)
-#   TISZTIT=1          replace the known homoglyphs instead of refusing (the
-#                      gate still re-checks afterwards; exit 3 if anything is
-#                      left). Not a first answer -- see the checker's message.
 # MEASURED 2026-09-13: a remote agent runs this helper OUTSIDE this repo, where localhost:3420
 # does not exist -- it had to fall back to raw curl, i.e. exactly the unchecked pattern this file was
 # written to eliminate. A hardcoded base URL silently un-installs the helper for everyone not on this
@@ -76,16 +73,25 @@ TOKEN="$(cat "$TOKEN_FILE")"
 # Overridable so the suite can measure the missing-checker branch too.
 HG="${MARVEEN_HOMOGLYPH_BIN:-$BASE/scripts/lib/homoglyph.py}"
 if [ -r "$HG" ] && command -v python3 >/dev/null 2>&1; then
-  HG_ARGS=""
-  [ "${TISZTIT:-0}" = "1" ] && HG_ARGS="--tisztit"
-  # The cleaned text is what goes out under TISZTIT=1: the checker re-verifies
-  # after replacing, so the cleaning is never taken on trust.
-  if C_CLEAN="$(printf '%s' "$C" | python3 "$HG" $HG_ARGS)"; then
-    C="$C_CLEAN"
-  else
-    echo "FAIL: homoglyph gate refused the message; nothing was sent." >&2
-    exit 3
-  fi
+  # THE CHECKER IS A VERDICT, NOT A FILTER: what goes out is the text the
+  # sender typed, never the checker's stdout. Measured in the 2026-09-24 review
+  # of #1541: a checker that exits 0 with EMPTY stdout made this helper send an
+  # empty message and report OK -- a broken tool silently replaced the message
+  # instead of failing. The exit code is the only thing read here.
+  printf '%s' "$C" | python3 "$HG" >/dev/null
+  HG_RC=$?
+  case "$HG_RC" in
+    0) : ;;
+    # 3 is the checker's one documented refusal code; anything else is the
+    # CHECKER failing, not the text. They must not share a message: "refused"
+    # sends the sender to rewrite a word that may be perfectly fine, while a
+    # crashed checker is an unmeasured send and the operator's problem.
+    3) echo "FAIL: homoglyph gate refused the message; nothing was sent." >&2
+       exit 3 ;;
+    *) echo "FAIL: homoglyph checker CRASHED (rc=$HG_RC) at $HG; nothing was sent." >&2
+       echo "  This is not a verdict on the text -- fix or unset MARVEEN_HOMOGLYPH_BIN." >&2
+       exit 4 ;;
+  esac
 else
   echo "WARN: homoglyph checker not found at $HG -- sending UNCHECKED." >&2
 fi
