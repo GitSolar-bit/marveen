@@ -18,6 +18,7 @@ import {
   countPlannedKanbanCards,
   getDbFileSizeMb,
   getTokenPruneLag,
+  getStuckKanbanCards,
   type TokenPruneLag,
 } from '../../db.js'
 import { normalizeKanbanRefs } from '../kanban-ref-normalize.js'
@@ -302,7 +303,7 @@ export function buildHeartbeatSummaryResponse(
 const KANBAN_CARD_METHODS = ['PUT', 'DELETE'] as const
 
 export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
-  const { req, res, path, method } = ctx
+  const { req, res, path, method, url } = ctx
 
   if (path === '/api/kanban' && method === 'GET') {
     // Embed each card's labels in one extra JOIN query (getLabelsForAllCards)
@@ -341,6 +342,32 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
   // naming items; the numbers ONLY ever come from counts.
   if (path === '/api/kanban/heartbeat-summary' && method === 'GET') {
     json(res, buildHeartbeatSummaryResponse(getHeartbeatKanbanSummary(), countNewHotMemories(MAIN_AGENT_ID), countPlannedKanbanCards(), getDbFileSizeMb(), getTokenPruneLag()))
+    return true
+  }
+
+  // KANBANSTUCKURES916: replaces the kanban-audit skill's inline "status ==
+  // in_progress" detector (structurally near-always empty on this board) with
+  // a real "started, then went idle" measurement across all non-done statuses.
+  // See getStuckKanbanCards in db.ts for the "started"/"last_activity"
+  // definitions. `examined: 0` gets its own `empty_reason` -- the skill's
+  // job is to report "could not measure" instead of a reassuring false zero.
+  if (path === '/api/kanban/stuck' && method === 'GET') {
+    const plannedDaysRaw = url.searchParams.get('planned_days') ?? '7'
+    const activeDaysRaw = url.searchParams.get('active_days') ?? '3'
+    const plannedDays = Number(plannedDaysRaw)
+    const activeDays = Number(activeDaysRaw)
+    if (!Number.isFinite(plannedDays) || plannedDays <= 0 || !Number.isFinite(activeDays) || activeDays <= 0) {
+      json(res, { error: 'invalid planned_days/active_days: must be positive numbers' }, 400)
+      return true
+    }
+    // 600s: the measured creator-comment window (D001, ELSOKOR922 Phase 0) --
+    // an immediate comment on a fresh card is a description, not a work-trace.
+    const result = getStuckKanbanCards({ plannedDays, activeDays, creatorCommentWindowSec: 600 })
+    if (result.examined === 0) {
+      json(res, { ...result, empty_reason: 'nincs megkezdett kártya' })
+    } else {
+      json(res, result)
+    }
     return true
   }
 
@@ -642,13 +669,17 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
       return true
     }
     const body = await readBody(req)
-    const { author, content } = JSON.parse(body.toString())
+    const { author, content, automated } = JSON.parse(body.toString())
     if (!author || !content) { json(res, { error: 'Szerző és tartalom kötelező' }, 400); return true }
     // Code-side kanban-ref enforcement: rewrite `#<hex8>` references that map
     // to a real card into the human-facing `#<seq>` form before persistence
     // (#75 Cuzcoo dispatch). Random hex / non-matching tokens pass through.
     const normalizedContent = normalizeKanbanRefs(content, getKanbanSeqByIdPrefix)
-    json(res, addKanbanComment(cardId, author, normalizedContent))
+    // `automated: true`: a bulk/machine writer marks its own comment, so the
+    // stuck detector never reads it as a work-trace (KANBANSTUCKURES916).
+    json(res, automated === true
+      ? addKanbanComment(cardId, author, normalizedContent, { automated: true })
+      : addKanbanComment(cardId, author, normalizedContent))
     return true
   }
 
