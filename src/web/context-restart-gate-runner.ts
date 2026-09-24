@@ -740,7 +740,15 @@ export function diagnoseAgent(name: string, nowMs: number) {
   }
 }
 
-async function checkAgent(name: string, nowMs: number): Promise<void> {
+/**
+ * One gate evaluation for one agent, including the side effects (the /clear,
+ * the persistent-block alert). EXPORTED FOR TESTS: the alert's envelope --
+ * sender, prefix and the 120-minute wording escalation -- is only observable
+ * from here, and all three were reverted by mutants that the suite passed
+ * (2026-09-24 review). A rule nobody can reach from a test is a rule nobody is
+ * measuring.
+ */
+export async function checkAgent(name: string, nowMs: number): Promise<void> {
   if (!readGateConfig(name).enabled) return   // fast-exit before any I/O
 
   // Settle any wake owed from an earlier /clear before measuring anything: the

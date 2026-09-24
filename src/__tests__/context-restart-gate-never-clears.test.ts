@@ -3,16 +3,24 @@
 // on had no path to becoming false. From the outside a gate that is being
 // careful and a gate that is wedged look identical -- both say "not yet".
 //
-// This file pins the two causes that could be fixed at the root, plus the
-// wording escalation for the one that cannot.
+// THIS FILE COVERS ONE OF THOSE CAUSES, AND ONLY THE READER SIDE OF IT. The
+// header used to claim it also pinned the alert's sender and the wording
+// escalation; it did not -- all five tests here exercise the transcript reader
+// (2026-09-24 review). Saying so mattered more than it looks: a header that
+// names a rule is read as evidence that the rule is measured, and nobody
+// re-checks it. The other two now live in
+// context-restart-gate-wiring.test.ts, driven through the production entry
+// points, with the mutants they kill named next to them.
 //
 //  GATEMTIME922  -- transcript activity was read from the FILE MTIME, and idle
 //                   sessions keep appending untimestamped bookkeeping records,
 //                   so the required quiet window never arrived (Willy: 240 min
-//                   blocked with no work at all).
+//                   blocked with no work at all). THIS is what the file below
+//                   measures.
 //  GATESENDER922 -- the supervisory alert was written in the WATCHED AGENT'S
 //                   name, so a genuine system message failed the fleet's own
-//                   authenticity rule (from_agent='system').
+//                   authenticity rule (from_agent='system'). Covered in
+//                   context-restart-gate-wiring.test.ts, not here.
 
 import { describe, it, expect } from 'vitest'
 import { mkdirSync, mkdtempSync, writeFileSync, utimesSync } from 'node:fs'

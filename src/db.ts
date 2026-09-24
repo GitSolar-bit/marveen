@@ -3274,9 +3274,16 @@ export function getDispatchedPendingStats(
   // sub-agents there was not a single one -- every row was a report ("KESZ:",
   // "A KERT MERES MEGVAN", "LEALLITVA, ES MEGMERTEM").
   //
-  // The reason is NOT that a sub-agent never asks its lead for anything -- it
-  // does, and a permission escalation is exactly that. The reason is that the
-  // two directions are ASYMMETRIC:
+  // THE RULE IS ABOUT THE MAIN AGENT, NOT ABOUT A LEAD. A report to a non-main
+  // lead (a sub-agent reporting to another sub-agent) is still counted, and on
+  // the reviewing fleet's live queue that is 15% of upward reports over 7 days
+  // (2026-09-24). That is deliberate -- this gate is about the main session --
+  // but the wording used to promise otherwise, so the next reader expected a
+  // case that is not handled.
+  //
+  // The reason is NOT that a sub-agent never asks the main agent for anything
+  // -- it does, and a permission escalation is exactly that. The reason is that
+  // the two directions are ASYMMETRIC:
   //   main -> sub: the main agent carries the THREAD. It has to fit the answer
   //     into a larger picture, and the owner sees one channel, the main one. If
   //     that context is lost before the answer lands, the cost is real.
