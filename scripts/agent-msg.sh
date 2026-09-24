@@ -25,6 +25,10 @@
 #   MARVEEN_API_BASE   full base URL, e.g. https://marveen.example.com (overrides host+port)
 #   MARVEEN_WEB_PORT   port for the default localhost base (default 3420)
 #   MARVEEN_TOKEN_FILE bearer token file (default <repo>/store/.dashboard-token)
+#   MARVEEN_HOMOGLYPH_BIN  the checker (default <repo>/scripts/lib/homoglyph.py)
+#   TISZTIT=1          replace the known homoglyphs instead of refusing (the
+#                      gate still re-checks afterwards; exit 3 if anything is
+#                      left). Not a first answer -- see the checker's message.
 # MEASURED 2026-09-13: a remote agent runs this helper OUTSIDE this repo, where localhost:3420
 # does not exist -- it had to fall back to raw curl, i.e. exactly the unchecked pattern this file was
 # written to eliminate. A hardcoded base URL silently un-installs the helper for everyone not on this
@@ -44,6 +48,47 @@ FROM="${1:?from required}"; TO="${2:?to required}"; C="${3:?content required (or
 [ "$C" = "-" ] && C="$(cat)"
 [ -r "$TOKEN_FILE" ] || { echo "FAIL: no token file at $TOKEN_FILE"; exit 1; }
 TOKEN="$(cat "$TOKEN_FILE")"
+
+# --- Homoglyph gate, BEFORE the payload is built (MSGGATE924) --------------
+# On the RAW text, not on the JSON: json.dumps escapes a Cyrillic letter into
+# \uXXXX, and a checker reading the encoded body would be looking at a string
+# where the problem is no longer visible as a letter. The gate has to see what
+# the sender typed.
+#
+# WHY IT IS HERE AND NOT IN EACH AGENT'S TOOLBOX. Measured 2026-09-24 across
+# three agents: two had built this guard for themselves, independently, because
+# both had been bitten by it; the third had no guard at all. And no CLAUDE.md
+# prescribes those private wrappers -- they all name THIS helper. The result was
+# predictable in hindsight: the agent who WROTE such a wrapper spent a whole day
+# calling this script directly, with the check run beside it in a separate
+# command instead of in front of it. One message went out contaminated while the
+# checker printed "NEM KULDOM EL" next to it. The rule that needs remembering is
+# not a rule; it has to sit in the path of the action.
+#
+# FAIL-OPEN ON A MISSING CHECKER, AND LOUDLY -- a deliberate exception to the
+# repo's usual fail-closed stance for gates (see .git/hooks/pre-commit.d). This
+# helper is the fleet's mandated message route: blocking every inter-agent
+# message on an install whose lib file is absent would be a far worse failure
+# than the one being prevented, and it would be a NEW failure, not today's. A
+# missing checker is exactly today's state, so the honest behaviour is to send
+# and say so. Contaminated text with the checker PRESENT is refused, which is
+# where the closed direction belongs.
+# Overridable so the suite can measure the missing-checker branch too.
+HG="${MARVEEN_HOMOGLYPH_BIN:-$BASE/scripts/lib/homoglyph.py}"
+if [ -r "$HG" ] && command -v python3 >/dev/null 2>&1; then
+  HG_ARGS=""
+  [ "${TISZTIT:-0}" = "1" ] && HG_ARGS="--tisztit"
+  # The cleaned text is what goes out under TISZTIT=1: the checker re-verifies
+  # after replacing, so the cleaning is never taken on trust.
+  if C_CLEAN="$(printf '%s' "$C" | python3 "$HG" $HG_ARGS)"; then
+    C="$C_CLEAN"
+  else
+    echo "FAIL: homoglyph gate refused the message; nothing was sent." >&2
+    exit 3
+  fi
+else
+  echo "WARN: homoglyph checker not found at $HG -- sending UNCHECKED." >&2
+fi
 
 BODY="$(FROM="$FROM" TO="$TO" C="$C" python3 -c 'import json,os; print(json.dumps({"from":os.environ["FROM"],"to":os.environ["TO"],"content":os.environ["C"]}))')"
 
