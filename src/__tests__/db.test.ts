@@ -24,6 +24,7 @@ import {
   createAgentMessage,
   getDispatchedPendingStats,
   COMPLETION_REPORT_PREFIX,
+  GATE_ALERT_ORIGIN_NOTE,
 } from '../db.js'
 import { DB_FILENAME } from '../config.js'
 
@@ -382,6 +383,32 @@ describe('getDispatchedPendingStats -- self-addressed messages', () => {
     const s = getDispatchedPendingStats('gatetest-solo', Date.now(), TWO_HOURS)
     expect(s.count).toBe(0)
     expect(s.hasStale).toBe(false)
+  })
+
+  it('ignores the restart gate\'s own persistent-block alert (GATESELFBLOCK922)', () => {
+    // The self-feeding loop, measured 2026-09-22/23: the gate's alert used to
+    // be written FROM the blocked agent TO the main agent, so for a SUB-agent
+    // it landed inside the very set it complains about. Every alert the block
+    // produced raised by one the number that caused the block, and the cadence
+    // closed the window to the second (alert every 2h, cutoff 2h, the old one
+    // falling out 3 SECONDS before the new one fell in). The main agent was
+    // immune only by accident: its alert is self-addressed, which the
+    // to_agent != from_agent rule already dropped.
+    createAgentMessage('gatetest-sub', 'gatetest-main',
+      '[CONTEXT-RESTART-GATE-RIASZTAS] blocked 120 perce', GATE_ALERT_ORIGIN_NOTE)
+    const s = getDispatchedPendingStats('gatetest-sub', Date.now(), TWO_HOURS)
+    expect(s.count).toBe(0)
+    expect(s.hasStale).toBe(false)
+  })
+
+  it('still counts real work when a gate alert is also pending (the exclusion stays narrow)', () => {
+    // The exclusion must not become "ignore pending outbound". A genuinely open
+    // report SHOULD hold a restart back; that is what the signal is for.
+    createAgentMessage('gatetest-both', 'gatetest-main',
+      '[CONTEXT-RESTART-GATE-RIASZTAS] blocked', GATE_ALERT_ORIGIN_NOTE)
+    createAgentMessage('gatetest-both', 'gatetest-peer', 'real delegation')
+    const s = getDispatchedPendingStats('gatetest-both', Date.now(), TWO_HOURS)
+    expect(s.count).toBe(1)
   })
 
   it('a self-message does not mask real dispatched work', () => {
