@@ -525,50 +525,28 @@ ACCENTLESS = {
 # nem a cirill puszta jelenletere -- egy szandekosan idegen nyelvu idezet
 # tiszta nem-latin szavai atmennek. Unicode-tudatos tokenizalas kell: a WORD
 # regex latin-only, egy homoglifas szot darabokra vagna.
-UWORD = re.compile(r"[^\W\d_]+", re.UNICODE)
-
-# HOMOGLYPHMICRO924: az "irasrendszer" itt a Unicode-nev ELSO SZAVA, es ez nehany
-# jelnel nem irasrendszer, hanem a jel neve. Merve 2026-09-24: a "40 us" (MICRO
-# SIGN), a "100 m2" es "5 cm3" (SUPERSCRIPT TWO/THREE) es a "H2O" (SUBSCRIPT TWO)
-# VEGYES SZOKENT blokkolt, mert a felso/also indexes szamjegy nem \d, tehat az
-# UWORD a szoba veszi. Ezek mertekegyseg- es kepletjelolesek, egyik sem alcaz
-# latin betut (a MICRO SIGN egyetlen confusable-je a gorog mu). A lista SZANDEKOSAN
-# explicit: a "minden nem-betu semleges" szabaly tul tag volna, mert a ROMAN
-# NUMERAL ONE (U+2160) is nem-betu, es latin I-nek latszik; a KELVIN SIGN (U+212A)
-# es az ANGSTROM SIGN (U+212B) betu, es latin K/A-nak latszik -- ezek maradnak
-# fogva.
-SCRIPT_NEUTRAL = frozenset(
-    ["\u00b5", "\u00b2", "\u00b3", "\u00b9", "\u2070"]
-    + [chr(cp) for cp in range(0x2074, 0x207A)]  # felso index 4..9
-    + [chr(cp) for cp in range(0x2080, 0x208A)]  # also index 0..9
+# THE RULE ITSELF LIVES IN scripts/lib/mixed_script.py, and is imported, not
+# copied. Measured 2026-09-24 (review of #1541): the inter-agent send gate had
+# re-implemented it as "any Cyrillic or Greek letter" and refused a plain
+# Russian quote and a standalone Greek symbol, both of which THIS path passes.
+# Two gates disagreeing about what is legitimate teach the sender that the rule
+# depends on which script they called. One source, so they cannot drift.
+#
+# AND THE #1548 EXCEPTION MOVED WITH IT. SCRIPT_NEUTRAL (HOMOGLYPHMICRO924:
+# the micro sign, superscripts and subscripts, so "40 µs", "100 m²" and
+# "H₂O" are not mixed-script words) lived in THIS file until the extraction.
+# It now lives in the shared module, so both paths get it -- before, only
+# this one did. It is imported here too, so an importer of this module keeps
+# seeing the name. This is the exception a rebase silently drops if only the
+# hook-side conflict is resolved, which is why the test suite measures
+# "40 µs" and "H₂O" on BOTH paths rather than trusting a green rebase.
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+from mixed_script import (  # noqa: E402
+    UWORD, SCRIPT_NEUTRAL, char_script, mixed_script_words,
 )
 
-
-def _char_script(ch: str) -> str:
-    import unicodedata
-    if ch in SCRIPT_NEUTRAL:
-        return "NEUTRAL"
-    try:
-        return unicodedata.name(ch).split(" ")[0]
-    except ValueError:
-        return "UNKNOWN"
-
-
-def mixed_script_words(text: str):
-    """Return [(word, bad_char, bad_char_name), ...] for words mixing LATIN
-    with any other script. Pure non-Latin words (foreign quotes) pass."""
-    import unicodedata
-    out = []
-    for word in UWORD.findall(text):
-        scripts = {_char_script(ch) for ch in word} - {"NEUTRAL"}
-        if "LATIN" in scripts and len(scripts) > 1:
-            bad = next(ch for ch in word if _char_script(ch) not in ("LATIN", "NEUTRAL"))
-            try:
-                bad_name = unicodedata.name(bad)
-            except ValueError:
-                bad_name = "UNKNOWN"
-            out.append((word, bad, f"{bad_name} (U+{ord(bad):04X})"))
-    return out
+_char_script = char_script   # the name this file used before the extraction
 
 
 EM_DASH = "—"
