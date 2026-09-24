@@ -59,15 +59,18 @@ say() { [ "$QUIET" = "1" ] || printf '%s\n' "$*"; }
 # Every pid from here to init, so neither this script nor the shell that
 # launched it can ever be counted as "the job we are waiting for".
 own_chain() {
-    local p=$$ guard=0
-    # PPid from /proc/<pid>/status, NOT field 4 of /proc/<pid>/stat: `comm` there
-    # is unquoted and may contain spaces, which shifts every later field. Measured
-    # 2026-09-24 -- field 4 came back as "S" (the state) and the whole ancestor
-    # walk died on `[: S: integer expected`, leaving only the name filter below.
+    local p=$$ guard=0 parent
+    # PORTABILITY (macOS, 2026-09-24 review): this used to read PPid from
+    # /proc/<pid>/status, which does not exist on macOS -- every ancestor lookup
+    # failed there, the walk stopped at once, and the self-exclusion below was
+    # left with nothing to exclude. `ps -o ppid=` is the same answer on both.
+    # (The /proc/<pid>/stat field-4 trap that predates this is now moot, but
+    # worth remembering: `comm` there is unquoted and shifts every later field.)
     while [ "$p" -gt 1 ] && [ "$guard" -lt 64 ]; do
         printf '%s\n' "$p"
-        p="$(awk '/^PPid:/{print $2}' "/proc/$p/status" 2>/dev/null)"
-        case "${p:-}" in ''|*[!0-9]*) break ;; esac
+        parent="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' \t')"
+        case "${parent:-}" in ''|*[!0-9]*) break ;; esac
+        p="$parent"
         guard=$((guard+1))
     done
 }
@@ -76,23 +79,52 @@ own_chain() {
 # command line runs this script (a second wait-for.sh watching the same thing
 # is not the job either).
 matching_pids() {
-    local pat="$1" self_name pid cmdline
+    local pat="$1" self_name pid cmdline own_list skip o
     self_name="$(basename "$0")"
-    local -a own=()
-    mapfile -t own < <(own_chain)
+    # NO mapfile HERE: it is bash 4+, and macOS ships bash 3.2.57. Measured by
+    # the reviewer on 2026-09-24: `mapfile: command not found` left `own` unset,
+    # `own[@]` tripped `set -u`, the match list came back empty, and the script
+    # reported "done after 0s" WHILE THE JOB WAS STILL RUNNING. A watcher that
+    # reports success early is worse than one that hangs: the `&&` chain
+    # continues on unfinished work. Newline-separated string + `case`, so the
+    # code path is identical on bash 3.2 and 5.x.
+    own_list="$(own_chain)"
     for pid in $(pgrep -f -- "$pat" 2>/dev/null); do
-        local skip=0 o
-        for o in "${own[@]}"; do [ "$pid" = "$o" ] && skip=1 && break; done
+        skip=0
+        for o in $own_list; do [ "$pid" = "$o" ] && { skip=1; break; }; done
         [ "$skip" = "1" ] && continue
-        # The pid can exit between pgrep and this read. The redirection failure is
-        # raised by the SHELL, so a 2>/dev/null on `tr` does not silence it --
-        # check readability first, or the watcher prints noise on every tick.
-        [ -r "/proc/$pid/cmdline" ] || continue
-        cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || continue
+        # The pid can exit between pgrep and this read; `ps` then prints nothing
+        # and exits non-zero, which is a normal outcome, not an error to report.
+        cmdline="$(ps -ww -o command= -p "$pid" 2>/dev/null)" || continue
         [ -n "$cmdline" ] || continue                  # kernel thread: no cmdline
         case "$cmdline" in *"$self_name"*) continue ;; esac
         printf '%s\n' "$pid"
     done
+}
+
+# --- is anything LISTENING on this port? ----------------------------------
+# `ss` is Linux-only (iproute2). On macOS it does not exist, so this mode could
+# never succeed there -- it just timed out after the full timeout and looked
+# like a slow service. `lsof` covers macOS and most Linux boxes. If NEITHER is
+# present the mode refuses LOUDLY (exit 2) instead of waiting for a condition it
+# has no way to observe: an unobservable condition is a measurement gap, not a
+# "not yet".
+PORT_TOOL=""
+port_tool() {
+    [ -n "$PORT_TOOL" ] && return 0
+    if command -v ss   >/dev/null 2>&1; then PORT_TOOL=ss;   return 0; fi
+    if command -v lsof >/dev/null 2>&1; then PORT_TOOL=lsof; return 0; fi
+    echo "port mode needs 'ss' or 'lsof', and neither is on PATH" >&2
+    echo "  (use 'file'/'pid' mode, or install one of them)" >&2
+    exit 2
+}
+listening() {
+    local port="$1"
+    port_tool
+    case "$PORT_TOOL" in
+        ss)   ss -lntH 2>/dev/null | awk -v p=":${port}" '$4 ~ p"$" {f=1} END{exit !f}' ;;
+        lsof) lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1 ;;
+    esac
 }
 
 # --- one evaluation of the condition; 0 = satisfied ------------------------
@@ -109,9 +141,7 @@ condition_met() {
             for a in "${ARGS[@]}"; do [ -e "$a" ] && return 1; done
             return 0 ;;
         port)
-            for a in "${ARGS[@]}"; do
-                ss -lntH 2>/dev/null | awk -v p=":${a}" '$4 ~ p"$" {f=1} END{exit !f}' || return 1
-            done
+            for a in "${ARGS[@]}"; do listening "$a" || return 1; done
             return 0 ;;
         pattern)
             for a in "${ARGS[@]}"; do [ -n "$(matching_pids "$a")" ] && return 1; done
