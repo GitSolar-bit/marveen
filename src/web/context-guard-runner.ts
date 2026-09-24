@@ -18,6 +18,7 @@ import { notifyChannel } from '../notify.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { detectPaneState, paneShowsContextSaturation } from '../pane-state.js'
 import { readContextTokensFromProjectDir, readActiveModelFromProjectDir, readTranscriptMtimeFromProjectDir } from './active-model.js'
+import { newestMainConfigRoot } from './inbound-probe.js'
 import { readContextGuardConfig } from './context-guard-store.js'
 import { localMidnightMs } from '../auto-restart.js'
 import { recordRescueFailure, clearRescueFailures } from './rescue-failure-tracker.js'
@@ -247,7 +248,12 @@ function configDirFor(name: string): string | undefined {
   // resolveAgentConfigDirForRead, not readAgentClaudeConfigDir: an agent whose
   // config dir was auto-provisioned by the launcher has no field to read, and
   // reading the host default silently returns another agent's absence.
-  return name === MAIN_AGENT_ID ? undefined : (resolveAgentConfigDirForRead(name) ?? undefined)
+  if (name !== MAIN_AGENT_ID) return resolveAgentConfigDirForRead(name) ?? undefined
+  // The main agent used to fall through to undefined here, i.e. the shared
+  // ~/.claude root. On an isolated install that directory still exists and
+  // still parses, so the read returned a STALE NUMBER rather than null -- and a
+  // stale number never looks broken (STUCKROOT923).
+  return newestMainConfigRoot()
 }
 
 /** Raw observed context size (tokens) for the idle-flush tier's absolute threshold. */
@@ -278,7 +284,8 @@ function measurePct(name: string, cfgLimit: number | null): number | null {
     limit = cfgLimit
   } else {
     const model = (name === MAIN_AGENT_ID
-      ? readActiveModelFromProjectDir(PROJECT_ROOT)
+      // configDir, not the bare default: same stale-root blindness as above.
+      ? readActiveModelFromProjectDir(PROJECT_ROOT, undefined, newestMainConfigRoot())
       : readAgentModel(name)) ?? ''
     // Calibrate against the persisted per-(agent, model) maximum, not just
     // the live reading: a fresh post-restart session must not un-learn a

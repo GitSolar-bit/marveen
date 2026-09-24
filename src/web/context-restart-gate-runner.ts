@@ -10,8 +10,12 @@ import { agentSessionName, capturePane } from './agent-process.js'
 import { sendSystemDirective } from './system-directive.js'
 import { detectPaneState } from '../pane-state.js'
 import { detectsUsageLimit } from '../model-fallback.js'
-import { readContextTokensFromProjectDir, projectsDirFor } from './active-model.js'
+import { readContextTokensFromProjectDir, projectsDirFor, readLastConversationTsFromProjectDir } from './active-model.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
+import { mainConfigRoots, newestMainConfigRoot } from './inbound-probe.js'
+// Re-exported for callers (and tests) that reached it here before STUCKROOT923
+// moved it next to mainConfigRoots().
+export { newestMainConfigRoot }
 import { withSessionSendLock } from './session-send-lock.js'
 import { getHardGuardPhase } from './context-guard-runner.js'
 import { readGateConfig, readGateRunState, writeGateRunState } from './context-restart-gate-store.js'
@@ -19,6 +23,7 @@ import {
   getDispatchedPendingStats,
   openInboundQuestionMessageId,
   createAgentMessage,
+  GATE_ALERT_ORIGIN_NOTE,
 } from '../db.js'
 import {
   decideGate,
@@ -172,14 +177,42 @@ function workingDirFor(name: string): string {
  * the gate's contextTokens comes back null -- which is a fail-closed BLOCK, so
  * the symptom is a gate that never opens and never says why.
  */
-function configDirFor(name: string): string | undefined {
+export function configDirFor(name: string): string | undefined {
   // resolveAgentConfigDirForRead, not readAgentClaudeConfigDir: the launcher
   // auto-provisions agents/<name>/.claude-config when no field is set, and
   // reading the host default returns a stale transcript instead of nothing --
   // which is worse than the null this comment warns about, because the gate
   // then believes it can see.
-  return name === MAIN_AGENT_ID ? undefined : (resolveAgentConfigDirForRead(name) ?? undefined)
+  if (name !== MAIN_AGENT_ID) return resolveAgentConfigDirForRead(name) ?? undefined
+
+  // The main agent used to return undefined here, i.e. the host default root --
+  // the exact trap the comment above warns about, applied to the one agent that
+  // was exempted from it. Since the channels session runs with
+  // CLAUDE_CONFIG_DIR=<PROJECT_ROOT>/.channels-config, its live transcript is
+  // NOT under ~/.claude, while the pre-migration directory there still exists
+  // and still parses. MEASURED 2026-09-17 on this install: the gate reported
+  // 49,483 context tokens from a transcript last written 2026-09-13 07:27,
+  // while the live session file under .channels-config was 16.4 MB and seconds
+  // old -- and the same stale read made msSinceTranscriptWrite() report 4.3
+  // days of quiet, which is FAIL-OPEN: the gate would have judged a session
+  // idle while it was mid-turn. Same defect class as TOKENVAK915 (1c8f4ff),
+  // which fixed token-usage and left this gate behind.
+  //
+  // mainConfigRoots() is reused rather than re-deriving the candidate list, for
+  // the same reason token-usage reuses it: a second copy of that list is how
+  // the scheduler probe and the watchdogs drifted apart before.
+  return newestMainConfigRoot()
 }
+
+/**
+ * The main agent's config root whose transcript directory was written most
+ * recently, or undefined when no candidate has one (then the caller's default
+ * applies, exactly as before).
+ *
+ * Newest-wins, not first-wins: both roots hold real history (the shared one
+ * pre-migration, the isolated one since), so picking by recency follows the
+ * live session across a migration without needing to know one happened.
+ */
 
 function agentIdForLedger(name: string): string {
   // The main agent's ledger key is the MAIN_AGENT_ID (e.g. "bigme"), same as
@@ -492,9 +525,26 @@ function hasLiveChildProcesses(session: string, mcpPatterns: string[]): boolean 
  * snapshot only shows whatever the terminal painted last. Between two tool
  * calls the pane reads idle; the transcript does not.
  */
-function msSinceTranscriptWrite(workingDir: string, nowMs: number): number | null {
+function msSinceTranscriptWrite(
+  workingDir: string,
+  nowMs: number,
+  configDir?: string,
+  agentForLog?: string,
+): number | null {
+  // Real conversation events first, file mtime only as a fallback (GATEMTIME922).
+  // The two answer different questions: mtime says when the FILE last grew, and
+  // idle sessions grow it forever with untimestamped bookkeeping records, so a
+  // gate waiting for mtime quiet waits for something that cannot happen. See
+  // readLastConversationTsFromProjectDir for the measurement.
+  const lastTurn = readLastConversationTsFromProjectDir(workingDir, configDir)
+  if (lastTurn !== null) return Math.max(0, nowMs - lastTurn)
+
   try {
-    const dir = projectsDirFor(workingDir)
+    // configDir matters MORE here than for the token read: a missing root makes
+    // this return a huge age, which reads as "quiet" and lets the gate clear a
+    // session that is in fact mid-turn. Fail-open, so it must use the same root
+    // the context read uses.
+    const dir = projectsDirFor(workingDir, configDir)
     if (!existsSync(dir)) return null
     let newest = 0
     for (const f of readdirSync(dir)) {
@@ -503,6 +553,12 @@ function msSinceTranscriptWrite(workingDir: string, nowMs: number): number | nul
       if (m > newest) newest = m
     }
     if (newest === 0) return null
+    // Reached only by a transcript with no timestamped line at all (a brand-new
+    // session file). Logged rather than silent: if this ever becomes the normal
+    // path, the GATEMTIME922 bug is back and the log is the only thing that
+    // would say so.
+    logger.debug({ agent: agentForLog ?? workingDir },
+      'context-restart-gate: no timestamped transcript line found, falling back to file mtime')
     return Math.max(0, nowMs - newest)
   } catch { return null }
 }
@@ -556,11 +612,24 @@ function getLiveWorkChildArgs(session: string, mcpPatterns: string[]): string[] 
       const args = getChildArgsStr(pid) ?? ''
       if (isMcpProcess(args, mcpPatterns)) continue
       if (isNonWorkHelperProcess(args)) continue   // keep in step with the decision path
-      result.push(args || `PID ${pid}`)
+      // AGE IS PART OF THE EVIDENCE, not decoration (GATEDEADLOCK922). A
+      // Task-tool subagent and a preview server we started ourselves look
+      // identical in the args alone, and the gate blocks for both. What tells
+      // them apart is how long they have been alive: the 2026-09-22 case was a
+      // preview server at 6893s, which no turn can plausibly be. Without the
+      // number the reader has to go and measure it before deciding anything.
+      result.push(`${args || `PID ${pid}`} (${Math.round(age / 60)}p)`)
     }
     return result
   } catch { return [] }
 }
+
+/**
+ * Minutes of an UNCHANGED block reason after which the alert stops describing a
+ * wait and starts describing a defect. Deliberately longer than any plausible
+ * single turn, so a genuinely busy session never trips it.
+ */
+const NEVER_CLEARS_MIN = 120
 
 // ---- Gate check for one agent -----------------------------------------------
 
@@ -672,7 +741,7 @@ export function gatherGateInputs(name: string, nowMs: number): GateSnapshot {
     pendingOutboundCount:   dispatchedStats === null ? 1 : dispatchedStats.count,
     hasStaleOutbound:       dispatchedStats?.hasStale ?? false,
     hasChildProcesses:      childProcesses,
-    msSinceTranscriptWrite: msSinceTranscriptWrite(workingDir, nowMs),
+    msSinceTranscriptWrite: msSinceTranscriptWrite(workingDir, nowMs, configDirFor(name), name),
     hasOpenQuestion:        openQuestion,
     hasLiveTaskState:       liveTaskState,
   }
@@ -778,11 +847,52 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
               childInfo = ` Blokkolo gyerekfolyamatok: ${workArgs.slice(0, 5).join('; ')}`
             }
           }
+          // A BLOCK THAT CANNOT CLEAR IS A FINDING, NOT PATIENCE (GATEDEADLOCK922).
+          //
+          // Three separate blocks on 2026-09-22 shared one shape: the condition
+          // they waited on had no path to becoming false. From the outside that
+          // is indistinguishable from a gate being carefully cautious, and the
+          // alert said the same words either way, every two hours, forever --
+          // which is how a real signal turns into wallpaper.
+          //
+          // Two of the three causes are now fixed at the root (GATEMTIME922,
+          // GATESELFBLOCK922). The third cannot be: a child process we started
+          // ourselves is legitimately alive, and killing it to open the gate
+          // would be the gate deciding something that is not its to decide. So
+          // the alert escalates in WORDING instead of repeating, and names what
+          // a human has to choose between.
+          const stuckLong = typeof blockedSinceMin === 'number'
+            && blockedSinceMin >= NEVER_CLEARS_MIN
+          const escalation = stuckLong
+            ? ` FIGYELEM: ugyanez az ok ${blockedSinceMin} perce valtozatlan, tehat ez a feltetel magatol valoszinuleg NEM fog megszunni. Ez lelet, nem varakozas: vagy a blokkolo dolgot kell lezarni, vagy a kaput kell ra felkesziteni.`
+            : ''
+          // SENDER AND PREFIX BOTH MATTER HERE (GATESENDER922, Willy's finding).
+          //
+          // This used to be createAgentMessage(name, ...), i.e. the supervisory
+          // system wrote its own alert in the WATCHED AGENT'S NAME. Measured
+          // 2026-09-22: 14 such rows existed under three different agent names,
+          // the oldest three days old, and eight of them read from=hex to=hex,
+          // so the main agent had been receiving its own gate alerts from
+          // itself for days without noticing.
+          //
+          // Two independent harms, and the second is the expensive one:
+          //  1. The fleet rule for authenticating system directives requires
+          //     from_agent='system'. A GENUINE supervisory alert therefore
+          //     failed its own authenticity test and looked like an injection.
+          //  2. Worse in the other direction: teaching agents that a
+          //     [CONTEXT-RESTART-GATE] message can legitimately arrive under an
+          //     agent name erases exactly the difference that would expose a
+          //     real injection.
+          //
+          // The prefix is distinct from the /clear continuation directive's on
+          // purpose. Same prefix for two different senders and two different
+          // meanings (act on this vs. read this) is what forced the reader to
+          // tell them apart from the sentence, not from the envelope.
           createAgentMessage(
-            name,
+            'system',
             MAIN_AGENT_ID,
-            `[CONTEXT-RESTART-GATE] A(z) "${name}" agens kapuja ${blockedSinceMin} perce folyamatosan blokkolt. Ok: ${decision.reason}.${childInfo} A(z) ${Math.round(cfg.thresholdTokens / 1000)}k tokenes kuszob ele ert, de a kapu nem enged -- ellenorizd hogy nincs-e elakadt munka.`,
-            'context-restart-gate persistent-block alert',
+            `[CONTEXT-RESTART-GATE-RIASZTAS] A(z) "${name}" agens kapuja ${blockedSinceMin} perce folyamatosan blokkolt. Ok: ${decision.reason}.${childInfo} A(z) ${Math.round(cfg.thresholdTokens / 1000)}k tokenes kuszob ele ert, de a kapu nem enged -- ellenorizd hogy nincs-e elakadt munka.${escalation} (Tajekoztatas, nem muveletkeres.)`,
+            GATE_ALERT_ORIGIN_NOTE,
           )
           logger.warn({ agent: name, reason: decision.reason, blockedSinceMin },
             'context-restart-gate: persistent-block alert sent')

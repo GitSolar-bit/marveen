@@ -24,6 +24,7 @@ import { PROJECT_ROOT } from '../config.js'
 import { readEnvFile } from '../env.js'
 import { getEffectiveSettingValue } from '../settings-store.js'
 import { resolveOwnerChatId } from '../owner-chat.js'
+import { projectsDirFor } from './active-model.js'
 
 // Mirrors KEEPALIVE_RESPAWN_GRACE_MS from channel-monitor.ts (15 min).
 // Not imported directly to avoid a circular module dependency: channel-monitor.ts
@@ -76,6 +77,44 @@ export const TRANSCRIPT_DIR = join(
 // them with ITS working dir. Keeping the isolation knowledge in one function is
 // the whole point -- a second copy is what produced the schedule-runner blind
 // spot this list was already supposed to prevent (2026-09-14).
+/**
+ * The main agent's config root whose transcript directory was written most
+ * recently, or undefined when no candidate has one (then the caller's default
+ * applies, exactly as before).
+ *
+ * Newest-wins, not first-wins: both roots hold real history (the shared one
+ * pre-migration, the isolated one since), so picking by recency follows the
+ * live session across a migration without needing to know one happened.
+ *
+ * Lives next to mainConfigRoots() on purpose. It was previously a private
+ * helper inside the restart-gate runner, and every other main-agent transcript
+ * reader (stuck-watcher, context guard, /api/marveen) silently kept reading the
+ * bare ~/.claude default instead -- STUCKROOT923. One home, one list.
+ *
+ * `roots` is injectable so the selection rule can be tested on fixture
+ * directories. It defaults to mainConfigRoots(); callers in production pass
+ * nothing, which is the point -- a second hand-written copy of that list is the
+ * drift this function exists to prevent.
+ */
+export function newestMainConfigRoot(
+  roots: ReadonlyArray<string | undefined> = mainConfigRoots(),
+): string | undefined {
+  let bestRoot: string | undefined
+  let bestMtime = -1
+  for (const root of roots) {
+    const dir = projectsDirFor(PROJECT_ROOT, root)
+    let entries: string[]
+    try { entries = readdirSync(dir) } catch { continue }
+    for (const f of entries) {
+      if (!f.endsWith('.jsonl')) continue
+      let m: number
+      try { m = statSync(join(dir, f)).mtimeMs } catch { continue }
+      if (m > bestMtime) { bestMtime = m; bestRoot = root }
+    }
+  }
+  return bestRoot
+}
+
 export function mainConfigRoots(): string[] {
   const roots = [
     join(process.env.HOME ?? homedir(), '.claude'),

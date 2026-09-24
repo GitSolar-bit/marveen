@@ -10,6 +10,7 @@ import { readMarveenTelegramConfig, readMarveenDiscordConfig, readMarveenSlackCo
 import { hardRestartMarveenChannels } from '../channel-monitor.js'
 import { readFileOr } from '../agent-config.js'
 import { parseMultipart } from '../multipart.js'
+import { newestMainConfigRoot } from '../inbound-probe.js'
 import { readBody, json, serveFile } from '../http-helpers.js'
 import { MAIN_CHANNELS_SESSION } from '../main-agent.js'
 import { readActiveModelFromProjectDir, readContextTokensFromProjectDir } from '../active-model.js'
@@ -17,7 +18,11 @@ import { readAutoRestartConfig } from '../auto-restart-store.js'
 import type { RouteContext } from './types.js'
 
 function getActiveMarveenModel(): string {
-  return readActiveModelFromProjectDir(PROJECT_ROOT) ?? 'unknown'
+  // newestMainConfigRoot(), not the bare default: the dashboard reported
+  // 'claude-sonnet-5' and 49,483 context tokens from a transcript frozen on
+  // 2026-09-13 while the live session ran on claude-opus-5[1m] (STUCKROOT923).
+  // Wrong-but-plausible values are worse than a missing one: nobody doubts them.
+  return readActiveModelFromProjectDir(PROJECT_ROOT, undefined, newestMainConfigRoot()) ?? 'unknown'
 }
 
 // Pure identity-core of the /api/marveen payload: the brand-relevant fields the
@@ -83,7 +88,7 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
       // orchestrator id (autoRestartId, part of idCore) so the UI PUTs to the
       // right store entry.
       autoRestart: readAutoRestartConfig(MAIN_AGENT_ID),
-      contextTokens: readContextTokensFromProjectDir(PROJECT_ROOT),
+      contextTokens: readContextTokensFromProjectDir(PROJECT_ROOT, newestMainConfigRoot()),
       hasTelegram: tg.hasTelegram,
       hasDiscord: dc.hasDiscord,
       hasSlack: sl.hasSlack,
