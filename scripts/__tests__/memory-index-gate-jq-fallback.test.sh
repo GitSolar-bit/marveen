@@ -52,8 +52,25 @@ print('' if v is None else v)
 
 # POSITIVE CONTROL on the sandbox itself: if jq were reachable from it, every
 # assertion below would measure the jq path and pass for the wrong reason.
+#
+# THE FORM MATTERS, AND THE FIRST ONE WAS BLIND (2026-09-24 review). It read
+# `env PATH="$BIN" command -v jq`, which can NEVER find anything: `command` is
+# a shell builtin and `env` cannot execute a builtin, so the check reported
+# "no jq" even with jq sitting in the sandbox. A control that always says what
+# you hoped is not a control. `/bin/sh -c` runs a real shell, so the builtin
+# exists and the lookup is genuine.
+sees_jq() { PATH="$1" /bin/sh -c 'command -v jq' >/dev/null 2>&1; }
+
+# META-CONTROL: prove the check can SEE a jq before trusting it to say there is
+# none. Same method the reviewer used to catch the blind form -- put one there
+# and look. Without this, switching the form would be a claim, not a measurement.
+FAKEBIN="$SANDBOX/fakebin"; mkdir -p "$FAKEBIN"
+printf '#!/bin/sh\nexit 0\n' > "$FAKEBIN/jq"; chmod +x "$FAKEBIN/jq"
+ok "the jq check is not blind: it SEES a jq that is there" \
+   "$(sees_jq "$FAKEBIN" && echo 0 || echo 1)" \
+   "the control cannot see a jq placed in front of it -- it proves nothing below"
 ok "the sandbox PATH really has no jq" \
-   "$(env PATH="$BIN" command -v jq >/dev/null 2>&1 && echo 1 || echo 0)" \
+   "$(sees_jq "$BIN" && echo 1 || echo 0)" \
    "jq is visible from the sandbox; the fallback would not be exercised"
 
 BIG="$SANDBOX/big.md"; SMALL="$SANDBOX/small.md"
@@ -108,6 +125,57 @@ json.load(open('$SANDBOX/state.json'))
 
 # Parity, only where it can be measured. No SKIP: the fallback above is the
 # point of this suite, and it ran.
+# --- THE FAIL-SAFE ON A BROKEN LINK MEASUREMENT, WITHOUT jq -----------------
+# Today's behaviour is right but unguarded (2026-09-24 review): a mutant whose
+# python fallback returns "0" for every field makes the jq-less gate SKIP on a
+# BROKEN link measurement -- it opens silently -- and all three suites stay
+# green. An unmeasurable condition must WAKE: "we could not measure it" is not
+# "it is fine". These checks turn red on that mutant.
+lc() {   # lc <script-body> -> runs the gate with that link checker, echoes SKIP or WAKE
+  printf '%s' "$1" > "$SANDBOX/lc.py"
+  out="$(env PATH="$BIN" MEMORY_INDEX_PATH="$SMALL" MEMORY_INDEX_STATE="$SANDBOX/lstate.json" \
+             MEMORY_LINKCHECK_BIN="$SANDBOX/lc.py" /bin/bash "$GATE" 2>/dev/null)"
+  [ "$out" = "SKIP" ] && echo SKIP || echo WAKE
+}
+
+ok "broken (non-JSON) link-checker output without jq -> WAKE" \
+   "$([ "$(lc 'import sys
+sys.stdout.write("not json at all")')" = "WAKE" ] && echo 0 || echo 1)" \
+   "the gate SKIPped on a link measurement it could not read"
+ok "EMPTY link-checker output without jq -> WAKE" \
+   "$([ "$(lc 'import sys')" = "WAKE" ] && echo 0 || echo 1)" \
+   "the gate SKIPped on an empty link measurement"
+ok "link checker exiting non-zero without jq -> WAKE" \
+   "$([ "$(lc 'import sys
+print("{}")
+sys.exit(3)')" = "WAKE" ] && echo 0 || echo 1)" \
+   "the gate SKIPped although the checker failed"
+
+# AND THE OTHER DIRECTION, or the three above would also pass on a gate that
+# wakes for everything: a VALID measurement must be read, and its number must
+# decide. This is the check the reviewer marked optional; without it, reverting
+# the link-branch read stays green.
+lc_valid() {   # lc_valid <missing-count> -> SKIP or WAKE
+  cat > "$SANDBOX/lc.py" <<EOF
+import json
+print(json.dumps({"missing": $1, "missing_occurrences": $1, "unique_targets": 3,
+                  "links_checked": 10, "files_scanned": 2, "missing_list": []}))
+EOF
+  out="$(env PATH="$BIN" MEMORY_INDEX_PATH="$SMALL" MEMORY_INDEX_STATE="$SANDBOX/lstate.json" \
+             MEMORY_LINKCHECK_BIN="$SANDBOX/lc.py" /bin/bash "$GATE" 2>/dev/null)"
+  [ "$out" = "SKIP" ] && echo SKIP || echo WAKE
+}
+ok "a valid link measurement with missing=0 without jq -> SKIP" \
+   "$([ "$(lc_valid 0)" = "SKIP" ] && echo 0 || echo 1)" "the gate woke on a clean link measurement"
+ok "  ...and missing=2 -> WAKE (the count is really read)" \
+   "$([ "$(lc_valid 2)" = "WAKE" ] && echo 0 || echo 1)" "the missing count did not reach the decision"
+ok "  ...and the state file carries the count, not just the verdict" \
+   "$(python3 -c "
+import json,sys
+d=json.load(open('$SANDBOX/lstate.json'))
+sys.exit(0 if str(d.get('missing_links')) == '2' else 1)
+" && echo 0 || echo 1)" "state: $(head -c 160 "$SANDBOX/lstate.json" 2>/dev/null)"
+
 if command -v jq >/dev/null 2>&1; then
   rm -f "$SANDBOX/state.json"
   env MEMORY_INDEX_PATH="$BIG" MEMORY_INDEX_STATE="$SANDBOX/state.json" /bin/bash "$GATE" >/dev/null 2>&1
