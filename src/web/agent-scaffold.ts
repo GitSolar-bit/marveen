@@ -845,11 +845,18 @@ export const BASH_EGRESS_DENY = [
 //     Do not read it as coverage.
 //   Bash(sudo:*) and Bash(rm:*) hold against an inserted prefix word, but NOT
 //     against an absolute path: `/usr/bin/sudo -n true` ran on a list carrying
-//     Bash(sudo:*) (measured 2026-09-25). The network rules above pair each
-//     command name with a `*/` form for exactly this reason; the same pairing for
-//     sudo/rm, and cover for the token files that actually hold the secrets here,
-//     are proposed separately and are NOT in this list yet -- they are the
-//     owner's open decision, not an oversight.
+//     only Bash(sudo:*) (measured 2026-09-25, reproduced independently). That is
+//     why the `*/` partners below are here: the network rules above have always
+//     had them, sudo and rm did not. NOTE the shape's cost, which the network
+//     rules already carry: `*/rm *` matches the whole command text, so a command
+//     that merely NAMES a path ending in `/rm` is denied too. That is the safe
+//     direction, but it is an over-match, not a precise rule.
+//
+// Cover for the token files that actually hold the secrets on an install
+// (store/.dashboard-token and friends) is deliberately NOT here. Every agent
+// reads those with `cat` every round, so whether a Read() rule reaches a Bash
+// read decides between "partial cover" and "the fleet stops". That measurement
+// is open; the rule waits for it.
 //
 // The HOME placeholder is resolved through resolveProfilePlaceholders like any
 // profile rule, which also rewrites a single leading '/' to '//': a single-slash
@@ -861,7 +868,9 @@ export const FLEET_BASELINE_DENY = [
   'Read(${HOME}/.env)',
   'Read(**/.env)',
   'Bash(sudo:*)',
+  'Bash(*/sudo *)',
   'Bash(rm:*)',
+  'Bash(*/rm *)',
   'Bash(curl -X POST:*)',
   'Bash(git push --force:*)',
   'Bash(git push -f:*)',

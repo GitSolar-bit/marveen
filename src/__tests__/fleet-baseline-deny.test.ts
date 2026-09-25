@@ -73,6 +73,18 @@ describe('(A) the baseline reaches EVERY profile, including ones added later', (
     }
   })
 
+  it('pairs every command-NAME rule with its absolute-path form', () => {
+    // DENYARGS925: a command-name deny holds against an inserted prefix word
+    // (`command sudo ...`) but NOT against an absolute path -- `/usr/bin/sudo -n
+    // true` ran on a list that carried Bash(sudo:*). The network rules always had
+    // a `*/` partner; sudo and rm did not. This pins that they keep one, so the
+    // pairing cannot be dropped in a later tidy-up.
+    for (const name of ['sudo', 'rm']) {
+      expect(FLEET_BASELINE_DENY).toContain(`Bash(${name}:*)`)
+      expect(FLEET_BASELINE_DENY).toContain(`Bash(*/${name} *)`)
+    }
+  })
+
   it('keeps the egress rules and the profile\'s own rules alongside the baseline', () => {
     writeAgentSettingsFromProfile(NAME, loadProfileTemplate('developer-senior'))
     const deny = readDeny()
@@ -94,6 +106,14 @@ describe('(B) the main agent gets the baseline from the repo project settings', 
       // ${HOME} is not expanded when Claude Code reads this file, so the shipped
       // form uses '~', which is MEASURED to match (TMPLPERM908).
       expect(deny).toContain(rule.replace('${HOME}', '~'))
+    }
+  })
+
+  it('ships the absolute-path partners too, not only the command names', () => {
+    const deny: string[] = settings.permissions?.deny ?? []
+    for (const name of ['sudo', 'rm']) {
+      expect(deny).toContain(`Bash(${name}:*)`)
+      expect(deny).toContain(`Bash(*/${name} *)`)
     }
   })
 
