@@ -1741,6 +1741,20 @@ export function scaffoldAgentDir(name: string) {
   // Seed settings.json from template so the agent gets the PreCompact
   // hook (memory save + skill reflection) out of the box. Only if the
   // file doesn't exist yet -- user edits and later profile writes stay.
+  //
+  // The template carries BASH_EGRESS_DENY but deliberately NOT
+  // FLEET_BASELINE_DENY, and the asymmetry is measured, not an oversight
+  // (DENYARGS925, 2026-09-25): the file written here holds 10 deny rules and
+  // zero of the floor's 14, but no session ever reads it in that state. On the
+  // create path (routes/agents.ts) this call and writeAgentSettingsFromProfile()
+  // are separated by two synchronous writes -- no await, no process launch --
+  // and on the spawn path the profile write runs before Claude Code starts.
+  // loadProfileTemplate() cannot fail its way past that either: it falls back to
+  // `default` and finally to HARDCODED_DEFAULT_PROFILE rather than throwing.
+  // The floor's single route is therefore the profile write, and the parity test
+  // in fleet-baseline-deny.test.ts pins that choice WITH its condition: add a
+  // route that scaffolds without writing the profile right after, and the floor
+  // belongs in this template too.
   const settingsJson = join(dir, '.claude', 'settings.json')
   if (!existsSync(settingsJson)) {
     const tplPath = join(PROJECT_ROOT, 'templates', 'settings.json.template')

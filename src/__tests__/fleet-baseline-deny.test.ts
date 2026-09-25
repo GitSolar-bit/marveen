@@ -13,7 +13,7 @@ import { join } from 'node:path'
 //   (A) sub-agents  -> the code-level floor in writeAgentSettingsFromProfile
 //   (B) main agent  -> the repo's tracked project settings (.claude/settings.json),
 //       which the scaffold deliberately never writes (#1305).
-import { writeAgentSettingsFromProfile, agentSettingsPath, FLEET_BASELINE_DENY } from '../web/agent-scaffold.js'
+import { writeAgentSettingsFromProfile, agentSettingsPath, FLEET_BASELINE_DENY, BASH_EGRESS_DENY } from '../web/agent-scaffold.js'
 import { agentDir } from '../web/agent-config.js'
 import { listProfileTemplates, loadProfileTemplate, resolveProfilePlaceholders } from '../web/profiles.js'
 import { PROJECT_ROOT } from '../config.js'
@@ -138,6 +138,19 @@ describe('(B) the main agent gets the baseline from the repo project settings', 
     }
   })
 
+  it('is the constant EXACTLY -- no extra rule the code list does not carry', () => {
+    // PARITY, both directions. The case above only proves the shipped file is not
+    // MISSING anything; a rule added to the file alone would pass it and then
+    // exist nowhere else -- the sub-agents would never get it, and the next
+    // reader would take the file for the source. This is the same contract the
+    // egress list has had since #1218 (template-vs-constant, toEqual), which the
+    // floor was shipped without: a later reorganisation could have drifted the
+    // two apart silently, and that is precisely the failure class this branch
+    // exists to close.
+    const deny: string[] = settings.permissions?.deny ?? []
+    expect(deny).toEqual(FLEET_BASELINE_DENY.map(r => r.replace('${HOME}', '~')))
+  })
+
   it('ships the absolute-path partners too, not only the command names', () => {
     const deny: string[] = settings.permissions?.deny ?? []
     for (const name of ['sudo', 'rm']) {
@@ -160,5 +173,50 @@ describe('(B) the main agent gets the baseline from the repo project settings', 
     expect(settings.enabledPlugins).toBeTruthy()
     expect(settings.hooks).toBeTruthy()
     expect(Object.keys(settings.hooks).length).toBeGreaterThan(0)
+  })
+})
+
+// DENYARGS925: permissions.deny now has TWO sources, and the difference between
+// them is not what they deny but how they REACH an agent. These cases pin the
+// boundary so a later tidy-up cannot quietly merge, duplicate or swap them.
+describe('the two deny lists stay distinguishable', () => {
+  it('the floor and the egress list are disjoint', () => {
+    const overlap = FLEET_BASELINE_DENY.filter(r => BASH_EGRESS_DENY.includes(r))
+    // Not cosmetic: writeAgentSettingsFromProfile pushes the egress list
+    // unconditionally and the floor deduped, so a rule living in BOTH would be
+    // maintained in two places with only one of them consulted on a change.
+    expect(overlap).toEqual([])
+  })
+
+  it('the scaffold template carries the egress list and NOT the floor -- with the condition that makes that safe', () => {
+    // MEASURED 2026-09-25: after scaffoldAgentDir() the template-derived
+    // settings.json holds 10 deny rules and ZERO of the floor's 14. That is safe
+    // only because no session reads the file in that state: on the create path
+    // (routes/agents.ts) scaffoldAgentDir and writeAgentSettingsFromProfile are
+    // separated by two synchronous writes -- no await, no process launch -- and
+    // on the spawn path the profile write precedes the Claude Code launch. The
+    // live fleet agrees: the leanest agent carries 16 rules, none carries 10.
+    //
+    // THE CONDITION, stated so it can be re-measured rather than re-argued: add a
+    // route that scaffolds WITHOUT writing the profile straight after, and this
+    // case should be inverted -- the floor then belongs in the template too.
+    const tpl = JSON.parse(readFileSync(join(PROJECT_ROOT, 'templates', 'settings.json.template'), 'utf-8'))
+    const tplDeny: string[] = tpl.permissions?.deny ?? []
+    expect(tplDeny).toEqual(BASH_EGRESS_DENY)
+    for (const rule of FLEET_BASELINE_DENY) {
+      expect(tplDeny).not.toContain(rule)
+      expect(tplDeny).not.toContain(rule.replace('${HOME}', '~'))
+    }
+  })
+
+  it('the docs name both lists, so neither reads as THE deny list', () => {
+    // The docs claimed BASH_EGRESS_DENY was "the single source of truth for ...
+    // permissions.deny". True until this branch, false after it -- and a stale
+    // doc that reads as complete is the same defect class as the comment that
+    // listed the weak rules and left the force-push lines out.
+    const docs = readFileSync(join(PROJECT_ROOT, 'docs', 'security-hardening.md'), 'utf-8')
+    expect(docs).toContain('FLEET_BASELINE_DENY')
+    expect(docs).toContain('Two lists, and why they are not one')
+    expect(docs).not.toMatch(/single source of truth\s*\n?\s*for a small `permissions\.deny` list/)
   })
 })
