@@ -584,6 +584,14 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   // function replaces permissions wholesale on each spawn, so without it a
   // respawn would silently drop what ensureBashEgressDeny() merged in.
   denyList.push(...BASH_EGRESS_DENY)
+  // Fleet baseline: the deny FLOOR every agent gets regardless of profile.
+  // Pushed here rather than copied into each templates/profiles/*.json so a
+  // profile added tomorrow cannot silently ship without it. Deduped against what
+  // the profile already declared (developer-senior and marketer both carry some
+  // of these), so the written file stays readable.
+  for (const rule of FLEET_BASELINE_DENY.map(r => resolveProfilePlaceholders(r, ctx))) {
+    if (!denyList.includes(rule)) denyList.push(rule)
+  }
   // Per-agent tool-name deny (agent-config.json "toolDeny"): merged LAST and
   // on EVERY spawn, because this function replaces the deny list wholesale --
   // a name written straight into settings.json disappears at the next respawn
@@ -812,6 +820,52 @@ export const BASH_EGRESS_DENY = [
   'Bash(*/ncat *)',
   'Bash(telnet *)',
   'Bash(*/telnet *)',
+]
+
+// The fleet-wide deny FLOOR: applied to EVERY profile, exactly like
+// BASH_EGRESS_DENY above and for the same reason. permissions.deny is rebuilt
+// WHOLESALE from the security profile on every spawn, so a rule that lives only
+// in one profile -- or worse, hand-written into a settings.json -- is not a
+// floor at all: it is whatever the agent's profile happens to carry, and it
+// disappears at the next respawn.
+//
+// Measured 2026-09-25 (DENYARGS925). The hand-edited lists would have dropped 5
+// rules on one agent and 9 on another at their next restart, and a
+// default-profile agent never had them at all: default.json carries ONE rule, so
+// it sat at 16 while a developer-senior agent sat at 24. Raising default.json
+// alone does not fix that -- profiles are independent, so a marketer or
+// developer-senior agent would still miss whatever was added there, and every
+// future profile is a new hole. One list, applied to all.
+//
+// Two rules in here are deliberately weaker than they look, and are kept for the
+// owner's stated posture rather than as protection:
+//   Bash(curl -X POST:*) is DECORATION. An argument-bearing rule matches the
+//     command's leading words exactly, so `curl -s -X POST` -- the form every
+//     example in our own docs uses -- walks past it (measured twice).
+//     Do not read it as coverage.
+//   Bash(sudo:*) and Bash(rm:*) hold against an inserted prefix word, but NOT
+//     against an absolute path: `/usr/bin/sudo -n true` ran on a list carrying
+//     Bash(sudo:*) (measured 2026-09-25). The network rules above pair each
+//     command name with a `*/` form for exactly this reason; the same pairing for
+//     sudo/rm, and cover for the token files that actually hold the secrets here,
+//     are proposed separately and are NOT in this list yet -- they are the
+//     owner's open decision, not an oversight.
+//
+// The HOME placeholder is resolved through resolveProfilePlaceholders like any
+// profile rule, which also rewrites a single leading '/' to '//': a single-slash
+// absolute Read rule is PROJECT-RELATIVE and silently never matches (TMPLPERM908).
+export const FLEET_BASELINE_DENY = [
+  'Read(${HOME}/.ssh/**)',
+  'Read(${HOME}/.aws/**)',
+  'Read(${HOME}/.gnupg/**)',
+  'Read(${HOME}/.env)',
+  'Read(**/.env)',
+  'Bash(sudo:*)',
+  'Bash(rm:*)',
+  'Bash(curl -X POST:*)',
+  'Bash(git push --force:*)',
+  'Bash(git push -f:*)',
+  'mcp__playwright__browser_run_code_unsafe',
 ]
 
 // Idempotently merge the egress deny rules into a settings object's
