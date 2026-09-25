@@ -9,13 +9,14 @@ import { join } from 'node:path'
 // rules while a developer-senior one sat at 24, and the hand-edited lists on
 // willy and zola would have lost 5 and 9 rules at their next restart.
 //
-// This file pins branch (A): the code-level floor in writeAgentSettingsFromProfile,
-// which covers every SUB-agent. The main agent is a separate mechanism (the
-// scaffold deliberately never writes its settings, #1305) and lands in the next
-// commit.
+// Two branches are pinned here, because they are two different mechanisms:
+//   (A) sub-agents  -> the code-level floor in writeAgentSettingsFromProfile
+//   (B) main agent  -> the repo's tracked project settings (.claude/settings.json),
+//       which the scaffold deliberately never writes (#1305).
 import { writeAgentSettingsFromProfile, agentSettingsPath, FLEET_BASELINE_DENY } from '../web/agent-scaffold.js'
 import { agentDir } from '../web/agent-config.js'
 import { listProfileTemplates, loadProfileTemplate, resolveProfilePlaceholders } from '../web/profiles.js'
+import { PROJECT_ROOT } from '../config.js'
 
 const NAME = 'fleet-baseline-test-agent'
 const DIR = agentDir(NAME)
@@ -78,5 +79,34 @@ describe('(A) the baseline reaches EVERY profile, including ones added later', (
     expect(deny).toContain('Bash(wget *)')
     expect(deny).toContain('Bash(*/wget *)')
     expect(deny).toContain('ScheduleWakeup')
+  })
+})
+
+describe('(B) the main agent gets the baseline from the repo project settings', () => {
+  // The scaffold refuses to write the main agent's settings (#1305), so the
+  // main agent's floor cannot come from (A). It ships in the repo instead.
+  const settingsPath = join(PROJECT_ROOT, '.claude', 'settings.json')
+  const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+
+  it('carries every baseline rule in its home-relative (~) form', () => {
+    const deny: string[] = settings.permissions?.deny ?? []
+    for (const rule of FLEET_BASELINE_DENY) {
+      // ${HOME} is not expanded when Claude Code reads this file, so the shipped
+      // form uses '~', which is MEASURED to match (TMPLPERM908).
+      expect(deny).toContain(rule.replace('${HOME}', '~'))
+    }
+  })
+
+  it('never hardcodes a developer machine home into the shipped file', () => {
+    const deny: string[] = settings.permissions?.deny ?? []
+    for (const rule of deny) {
+      expect(rule).not.toMatch(/\/(?:home|Users)\//)
+    }
+  })
+
+  it('adds permissions ALONGSIDE the existing keys, it does not replace them', () => {
+    expect(settings.enabledPlugins).toBeTruthy()
+    expect(settings.hooks).toBeTruthy()
+    expect(Object.keys(settings.hooks).length).toBeGreaterThan(0)
   })
 })
