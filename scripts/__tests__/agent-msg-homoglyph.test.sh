@@ -103,6 +103,40 @@ ENVX= send "gorog hom${GR}glifa egy szoban"
 ok "Greek mixed INTO a Latin word is refused" "$([ "$RC" = "3" ] && [ "$CALLED" = "no" ] && echo 0 || echo 1)" "rc=$RC"
 ok "  ...and the refusal names GREEK" "$(printf '%s' "$ERR" | grep -qi 'GREEK' && echo 0 || echo 1)" "stderr: $ERR"
 
+# --- UNIT AND FORMULA NOTATION IS NOT A MIXED-SCRIPT WORD -------------------
+# HOMOGLYPHMICRO924 (#1548) fixed this on the outgoing-copy hook ONLY, because
+# that is where the rule lived. This path kept blocking "40 us": a super/
+# subscript digit is not \d, so the word tokenizer takes it into the word, and
+# the FIRST WORD of the Unicode name ("MICRO", "SUPERSCRIPT", "SUBSCRIPT") is
+# not a script -- it is the name of the sign. SCRIPT_NEUTRAL now lives in
+# scripts/lib/mixed_script.py with the rule itself, so both paths get it.
+#
+# THESE THREE CASES EXIST BECAUSE OF THE REBASE. The exception sat in the hook
+# file that this branch rewrites; a rebase that resolves only the hook-side
+# conflict drops it silently and "40 us" is blocked again on BOTH paths, with
+# every test still green. So the measurement is here, on the send path, where
+# #1548's own tests never reached.
+MU="$(python3 -c 'print(chr(0xB5))')"     # MICRO SIGN
+SUP2="$(python3 -c 'print(chr(0xB2))')"   # SUPERSCRIPT TWO
+SUB2="$(python3 -c 'print(chr(0x2082))')" # SUBSCRIPT TWO
+ENVX= send "a kesleltetes 40 ${MU}s volt"
+ok "the micro sign in a unit is SENT (40 us)" \
+   "$([ "$RC" = "0" ] && [ "$CALLED" = "yes" ] && echo 0 || echo 1)" "rc=$RC curl-called=$CALLED err: $ERR"
+ENVX= send "a felulet 100 m${SUP2} volt"
+ok "a superscript digit is SENT (100 m2)" \
+   "$([ "$RC" = "0" ] && [ "$CALLED" = "yes" ] && echo 0 || echo 1)" "rc=$RC curl-called=$CALLED err: $ERR"
+ENVX= send "a keplet H${SUB2}O marad"
+ok "a subscript digit is SENT (H2O)" \
+   "$([ "$RC" = "0" ] && [ "$CALLED" = "yes" ] && echo 0 || echo 1)" "rc=$RC curl-called=$CALLED err: $ERR"
+# ...and the exception must stay NARROW. "Every non-letter is neutral" would be
+# the tempting simplification, and it would let ROMAN NUMERAL ONE through --
+# a non-letter that looks exactly like a latin I. That is the homoglyph this
+# gate exists for, so it has to stay caught.
+RN1="$(python3 -c 'print(chr(0x2160))')"  # ROMAN NUMERAL ONE
+ENVX= send "verz${RN1}o egy szoban"
+ok "the neutral list stays narrow: ROMAN NUMERAL ONE is still refused" \
+   "$([ "$RC" = "3" ] && [ "$CALLED" = "no" ] && echo 0 || echo 1)" "rc=$RC curl-called=$CALLED"
+
 # --- THE TWO PATHS MUST NOT DRIFT -------------------------------------------
 # The anti-drift guarantee is not "we copied the rule carefully", it is this
 # measurement: one corpus, both implementations, identical verdicts. The rule
@@ -124,6 +158,10 @@ corpus = [
     "Delta: \u0394 = 12 ms", "\u03c0 r^2",
     "szennyezett sz%sveg" % CY, "hom%sglifa" % GR, "MIXED%sCASE" % CY.upper(),
     "url https://example.com/a?b=1", "szam 12345 es -- kotojel",
+    # HOMOGLYPHMICRO924: neutral on BOTH paths, or the rule drifted again.
+    "40 \u00b5s", "100 m\u00b2", "5 cm\u00b3", "H\u2082O",
+    # ...but a non-letter that DISGUISES a latin letter is not neutral.
+    "verz\u2160o",
     "kev%srt sz%s egyben" % (CY, GR),
 ]
 bad = 0

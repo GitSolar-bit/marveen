@@ -540,11 +540,39 @@ ACCENTLESS = {
 # seeing the name. This is the exception a rebase silently drops if only the
 # hook-side conflict is resolved, which is why the test suite measures
 # "40 µs" and "H₂O" on BOTH paths rather than trusting a green rebase.
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from mixed_script import (  # noqa: E402
-    UWORD, SCRIPT_NEUTRAL, char_script, mixed_script_words,
-)
+#
+# GUARDED, for the same reason as the email_extract import below, and measured
+# the same way: a bare ImportError fires during MODULE LOAD, escapes the
+# __main__ net and exits 1 -- and PreToolUse reads 1 as NON-blocking, so the
+# send would run UNCHECKED. That is the one outcome a gate must never have.
+# scripts/__tests__/email-extract-parity.test.py copies this file to a
+# directory where neither module resolves and requires exit 2; before this
+# guard the extraction turned that case from BLOCKED into a crash.
+#
+# The stub does NOT invent a fallback rule. A gate that cannot load its rule
+# has no verdict, and "no verdict" here means BLOCK, not pass: the call sites
+# turn MixedScriptUnavailable into a refusal that says the rule could not be
+# loaded, instead of a homoglyph finding that was never measured.
+class MixedScriptUnavailable(RuntimeError):
+    """The shared mixed-script rule could not be imported."""
+
+
+try:
+    sys.path.insert(0, os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+    from mixed_script import (  # noqa: E402
+        UWORD, SCRIPT_NEUTRAL, char_script, mixed_script_words,
+    )
+except Exception as _mixed_exc:  # noqa: BLE001 -- deliberate fail-closed stub
+    _MIXED_ERR = repr(_mixed_exc)
+    UWORD = re.compile(r"[^\W\d_]+", re.UNICODE)
+    SCRIPT_NEUTRAL = frozenset()
+
+    def char_script(ch: str) -> str:
+        return "UNKNOWN"
+
+    def mixed_script_words(text: str):
+        raise MixedScriptUnavailable(_MIXED_ERR)
 
 _char_script = char_script   # the name this file used before the extraction
 
@@ -1140,7 +1168,16 @@ def audit(text: str):
     # homoglifaja atcsuszna (merve: a 'kerlek+koszonom' paros keves a
     # nyelv-detektorhoz). A konkret szot ES karaktert nevezzuk meg, mert a
     # hiba szemre lathatatlan -- enelkul a javitas talalgatas lenne.
-    mixed = mixed_script_words(prose)
+    try:
+        mixed = mixed_script_words(prose)
+    except MixedScriptUnavailable as exc:
+        problems.append(
+            "A VEGYES-IRASRENDSZER SZABALY NEM TOLTHETO BE "
+            f"(scripts/lib/mixed_script.py: {exc}). Ez NEM homoglifa-talalat: a "
+            "szabaly meg sem futott, tehat a szovegrol semmit nem tudunk. "
+            "Szandekosan fail-closed."
+        )
+        mixed = []
     if mixed:
         shown = "; ".join(f"{w!r} -- benne {name}" for w, _c, name in mixed[:5])
         more = f" (+{len(mixed) - 5} tovabbi)" if len(mixed) > 5 else ""
@@ -1348,7 +1385,16 @@ def inter_agent_homoglyph_gate(cmd: str) -> None:
         _gate_log(msg)
         print(json.dumps({"systemMessage": msg}))
         sys.exit(0)
-    mixed = mixed_script_words(text)
+    try:
+        mixed = mixed_script_words(text)
+    except MixedScriptUnavailable as exc:
+        sys.stderr.write(
+            "KIMENO-SZOVEG KAPU (inter-agent): TILTVA -- a vegyes-irasrendszer szabaly "
+            f"NEM TOLTHETO BE (scripts/lib/mixed_script.py: {exc}).\n"
+            "Ez nem a szovegrol szol: a szabaly meg sem futott. Szandekosan fail-closed, "
+            "mert egy le nem futott ellenorzes nem 'rendben'.\n"
+        )
+        sys.exit(2)
     if mixed:
         shown = "; ".join(f"{w!r} -- benne {name}" for w, _c, name in mixed[:5])
         more = f" (+{len(mixed) - 5} tovabbi)" if len(mixed) > 5 else ""
