@@ -85,6 +85,35 @@ describe('(A) the baseline reaches EVERY profile, including ones added later', (
     }
   })
 
+  it('pairs the force-push rules with the absolute-path form too', () => {
+    // The git rules are shaped differently from sudo/rm -- the name rule carries
+    // a SUBCOMMAND (`git push --force`), so its partner cannot be
+    // `Bash(*/git push --force *)`: that is still a leading-word match and the
+    // absolute path moves the words. The partner is the broad `Bash(*/git *)`,
+    // which is why it is pinned separately from the sudo/rm loop above.
+    expect(FLEET_BASELINE_DENY).toContain('Bash(git push --force:*)')
+    expect(FLEET_BASELINE_DENY).toContain('Bash(git push -f:*)')
+    expect(FLEET_BASELINE_DENY).toContain('Bash(*/git *)')
+  })
+
+  it('the comment names the force-push limit, so the list cannot be read as cover', () => {
+    // This is the finding that prompted the pairing (Sam, 2026-09-25): the block
+    // comment LISTS the weak rules by name and, before this change, left the two
+    // git lines out -- so a reader approving the list read them as protection.
+    // The measured limit therefore has to survive a later tidy-up, which is what
+    // this pins. `git -C <path> push --force` RAN with the pair installed
+    // (measured by HEX, with a control in both directions).
+    const src = readFileSync(join(PROJECT_ROOT, 'src/web/agent-scaffold.ts'), 'utf-8')
+    const start = src.indexOf('The fleet-wide deny FLOOR')
+    const end = src.indexOf('export const FLEET_BASELINE_DENY')
+    expect(start).toBeGreaterThan(0)
+    expect(end).toBeGreaterThan(start)
+    const comment = src.slice(start, end)
+    expect(comment).toContain('git -C <path> push --force')
+    expect(comment).toContain('NARROWED')
+    expect(comment).toContain('NOT fixable by a better pattern')
+  })
+
   it('keeps the egress rules and the profile\'s own rules alongside the baseline', () => {
     writeAgentSettingsFromProfile(NAME, loadProfileTemplate('developer-senior'))
     const deny = readDeny()
@@ -115,6 +144,9 @@ describe('(B) the main agent gets the baseline from the repo project settings', 
       expect(deny).toContain(`Bash(${name}:*)`)
       expect(deny).toContain(`Bash(*/${name} *)`)
     }
+    // The force-push partner has a different shape (see the (A) case above), so
+    // it is pinned by name rather than through the loop.
+    expect(deny).toContain('Bash(*/git *)')
   })
 
   it('never hardcodes a developer machine home into the shipped file', () => {

@@ -851,6 +851,20 @@ export const BASH_EGRESS_DENY = [
 //     rules already carry: `*/rm *` matches the whole command text, so a command
 //     that merely NAMES a path ending in `/rm` is denied too. That is the safe
 //     direction, but it is an over-match, not a precise rule.
+//   Bash(git push --force:*) and Bash(git push -f:*) are NARROWED by the
+//     Bash(*/git *) partner, but NOT closed. Measured 2026-09-25 by HEX in his
+//     own session, with a control in BOTH directions -- the rule added
+//     temporarily, measured, removed, and the removal measured too:
+//       with the pair:    /usr/bin/git push --force <remote>   -> DENIED
+//       with the pair:    git -C <path> push --force <remote>  -> RAN
+//       after removal:    /usr/bin/git push --force <remote>   -> RAN again
+//     The third line is what makes the first one evidence: the denial came from
+//     the added rule, not from something else. So the REARRANGED form gets
+//     through, because `git -C <path> push` puts the subcommand where no
+//     leading-word rule looks. This is NOT fixable by a better pattern: the only
+//     pattern that would catch both denies the whole `git` command, which would
+//     stop development itself. Force-push here is NARROWABLE, not closeable --
+//     read these three lines as friction against a slip, never as a guarantee.
 //
 // Cover for the token files that actually hold the secrets on an install
 // (store/.dashboard-token and friends) is deliberately NOT here. Every agent
@@ -874,6 +888,7 @@ export const FLEET_BASELINE_DENY = [
   'Bash(curl -X POST:*)',
   'Bash(git push --force:*)',
   'Bash(git push -f:*)',
+  'Bash(*/git *)',
   'mcp__playwright__browser_run_code_unsafe',
 ]
 
