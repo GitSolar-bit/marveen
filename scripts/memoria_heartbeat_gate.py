@@ -145,28 +145,44 @@ MARKER_FILE = MARVEEN_DIR / "store" / "memoria-heartbeat-gate-last.txt"
 MESSAGES_URL = "http://localhost:3420/api/messages"
 
 def main_agent_id() -> str:
-    """The installation's own main-agent id, read at call time.
+    """The installation's own main-agent id, resolved THE WAY THE PRODUCT DOES.
 
-    BEEGETETT913: this used to be a hardcoded agent name from the upstream
-    install. A name that does not exist here is not a loud failure -- the
-    dashboard accepts the POST and the message lands in a mailbox nobody
-    reads, so the alert is lost exactly when it matters.
+    BEEGETETT913: this used to be a hardcoded agent name from a different
+    install ("picard", "seven"). A name that does not exist here is not a loud
+    failure -- the dashboard rejects the POST with 403 and the gate's alert is
+    lost, or worse, it is accepted into a mailbox nobody reads.
 
-    The .env is the only authority, and there is DELIBERATELY no default:
-    substituting one install's name for another is the same defect with a
-    different value, and it would restore the silent loss this fixes. An
-    empty return is the caller's signal to refuse loudly.
+    The fallback is "marveen" ON PURPOSE, and it is not the old defect coming
+    back: src/config.ts resolves MAIN_AGENT_ID exactly this way
+    (`env['MAIN_AGENT_ID'] ?? 'marveen'`) so that an older install upgrading in
+    place keeps working. On such an install "marveen" IS the registered main
+    agent, so the POST is accepted. The defect was never "there is a default" --
+    it was a name written into this script that had nothing to do with the
+    install it runs on. Resolving it the same way the product does is the fix.
+
+    Accepts the shapes a hand-edited .env actually contains: a leading
+    `export `, surrounding quotes, and a trailing ` # comment`.
     """
     env = MARVEEN_DIR / ".env"
     try:
         for line in env.read_text(encoding="utf-8").splitlines():
-            if line.startswith("MAIN_AGENT_ID="):
-                value = line.split("=", 1)[1].strip().strip("\"'")
-                if value:
-                    return value
+            line = line.strip()
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
+            if not line.startswith("MAIN_AGENT_ID="):
+                continue
+            value = line.split("=", 1)[1].strip()
+            if value[:1] in ("'", '"'):
+                # quoted: the value ends at the closing quote, so a '#' inside stays
+                zaro = value.find(value[0], 1)
+                if zaro > 0:
+                    return value[1:zaro]
+            value = value.split("#", 1)[0].strip().strip("\"'")
+            if value:
+                return value
     except OSError:
         pass
-    return ""
+    return "marveen"
 
 
 # Resolved once at import: AGENT is not only the message recipient, it is
@@ -300,7 +316,11 @@ def wake_agent(seen: dict[str, int], maxima: dict[str, int]) -> None:
         tool_max=maxima["tool_call_log"],
         tool_new=count_new(seen["tool_call_log"], "tool_call_log"),
     )
-    payload = json.dumps({"from": "memoria-gate", "to": AGENT, "content": content}).encode()
+    # The sender is the agent id, not a descriptive label: the API accepts only
+    # a registered fleet agent id and answers 403 to anything else (measured
+    # 2026-09-25 against the live dashboard). What the message IS says so in its
+    # own text, not in the envelope.
+    payload = json.dumps({"from": AGENT, "to": AGENT, "content": content}).encode()
     req = urllib.request.Request(
         MESSAGES_URL,
         data=payload,
@@ -404,16 +424,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.conv_upto is not None and not args.mark_seen:
         parser.error("--conv-upto only means anything together with --mark-seen")
 
-    # AGENT is the SQL filter as well as the recipient, and an empty filter
-    # does not fail -- it matches no rows, and the gate would report "no
-    # activity" forever. Refuse here, where it is visible in the cron log.
-    if not AGENT:
-        print(
-            "MAIN_AGENT_ID is not set in the install's .env; refusing to run "
-            "with an unknown agent id",
-            file=sys.stderr,
-        )
-        return 2
 
     return mark_seen(args.conv_upto) if args.mark_seen else check()
 

@@ -58,28 +58,44 @@ TOKEN_FILE = MARVEEN_DIR / "store" / ".dashboard-token"
 MESSAGES_URL = "http://localhost:3420/api/messages"
 
 def main_agent_id() -> str:
-    """The installation's own main-agent id, read at call time.
+    """The installation's own main-agent id, resolved THE WAY THE PRODUCT DOES.
 
-    BEEGETETT913: this used to be a hardcoded agent name from the upstream
-    install. A name that does not exist here is not a loud failure -- the
-    dashboard accepts the POST and the message lands in a mailbox nobody
-    reads, so the alert is lost exactly when it matters.
+    BEEGETETT913: this used to be a hardcoded agent name from a different
+    install ("picard", "seven"). A name that does not exist here is not a loud
+    failure -- the dashboard rejects the POST with 403 and the gate's alert is
+    lost, or worse, it is accepted into a mailbox nobody reads.
 
-    The .env is the only authority, and there is DELIBERATELY no default:
-    substituting one install's name for another is the same defect with a
-    different value, and it would restore the silent loss this fixes. An
-    empty return is the caller's signal to refuse loudly.
+    The fallback is "marveen" ON PURPOSE, and it is not the old defect coming
+    back: src/config.ts resolves MAIN_AGENT_ID exactly this way
+    (`env['MAIN_AGENT_ID'] ?? 'marveen'`) so that an older install upgrading in
+    place keeps working. On such an install "marveen" IS the registered main
+    agent, so the POST is accepted. The defect was never "there is a default" --
+    it was a name written into this script that had nothing to do with the
+    install it runs on. Resolving it the same way the product does is the fix.
+
+    Accepts the shapes a hand-edited .env actually contains: a leading
+    `export `, surrounding quotes, and a trailing ` # comment`.
     """
     env = MARVEEN_DIR / ".env"
     try:
         for line in env.read_text(encoding="utf-8").splitlines():
-            if line.startswith("MAIN_AGENT_ID="):
-                value = line.split("=", 1)[1].strip().strip("\"'")
-                if value:
-                    return value
+            line = line.strip()
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
+            if not line.startswith("MAIN_AGENT_ID="):
+                continue
+            value = line.split("=", 1)[1].strip()
+            if value[:1] in ("'", '"'):
+                # quoted: the value ends at the closing quote, so a '#' inside stays
+                zaro = value.find(value[0], 1)
+                if zaro > 0:
+                    return value[1:zaro]
+            value = value.split("#", 1)[0].strip().strip("\"'")
+            if value:
+                return value
     except OSError:
         pass
-    return ""
+    return "marveen"
 
 # Proof-of-life artefact: its mtime answers "did the silent path actually run
 # today", which "is the task enabled" does not.
@@ -130,19 +146,19 @@ def current_activity_id() -> str:
 
 def notify_seven(activity_id: str) -> None:
     """Wake Seven. Raises on any failure so the caller can roll the state back."""
-    recipient = main_agent_id()
-    if not recipient:
-        # Raising is the loud path: the caller rolls the state back, so the
-        # next run retries instead of marking this activity as handled.
-        raise RuntimeError(
-            "MAIN_AGENT_ID is not set in the install's .env; refusing to send "
-            "the notification to a guessed recipient"
-        )
+    # SENDER AND RECIPIENT ARE BOTH THE MAIN AGENT, and the sender is not a
+    # descriptive label. Measured on the live dashboard 2026-09-25:
+    #   from=garmin-gate -> HTTP 403,  from=memoria-gate -> HTTP 403,
+    #   from=<the install's main agent> -> HTTP 200
+    # The API only accepts a registered fleet agent id, so a readable name like
+    # "garmin-gate" loses the message just as surely as the old hardcoded one
+    # did. The source is named in the content prefix instead.
+    agent = main_agent_id()
     token = TOKEN_FILE.read_text().strip()
     payload = json.dumps(
         {
-            "from": "garmin-gate",
-            "to": recipient,
+            "from": agent,
+            "to": agent,
             "content": NOTIFY_TEMPLATE.format(
                 activity_id=activity_id, pending=PENDING_FILE
             ),

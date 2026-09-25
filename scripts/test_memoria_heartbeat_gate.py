@@ -25,6 +25,8 @@ SPEC = importlib.util.spec_from_file_location(
 gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 
+VALODI_WAKE = gate.wake_agent  # a wire() lecsereli, ezert itt kell elkapni
+
 FAILURES: list[str] = []
 
 
@@ -381,15 +383,13 @@ def scenario_conv_upto_clamped() -> None:
 
 
 def scenario_agent_id_comes_from_env() -> None:
-    """BEEGETETT913: the recipient must not be a hardcoded upstream name.
+    """BEEGETETT913: the id must be the INSTALL's, resolved the way the product does.
 
-    The other scenarios follow gate.AGENT wherever it points, so they pass
-    with ANY value -- including the old hardcoded one. This is the scenario
-    that looks at the value itself. A name that does not exist on this install
-    is not a loud failure: the dashboard accepts the POST and the wake-up lands
-    in a mailbox nobody reads, so the gate goes quiet exactly when it matters.
+    The other scenarios follow gate.AGENT wherever it points, so they pass with
+    ANY value -- including the old hardcoded "picard". This is the scenario that
+    looks at the value itself.
     """
-    print("the agent id is read from .env, not hardcoded")
+    print("the agent id is resolved like the product does")
     env = gate.MARVEEN_DIR / ".env"
     expected = None
     try:
@@ -404,20 +404,95 @@ def scenario_agent_id_comes_from_env() -> None:
         check_eq("AGENT matches .env MAIN_AGENT_ID", gate.AGENT, expected)
         check_eq("main_agent_id() agrees", gate.main_agent_id(), expected)
     else:
-        # No .env (a stripped checkout, or a git worktree): there must be NO
-        # default at all. Any name we could put here would belong to one
-        # install and be wrong on every other one, which is the defect itself.
-        check_eq("no guessed default", gate.AGENT, "")
-        check_eq("main_agent_id() agrees", gate.main_agent_id(), "")
-        # And the refusal has to be LOUD: a silent empty filter matches no
-        # rows, so the gate would report "nothing happened" forever.
-        check_eq("main() refuses instead of running", gate.main([]), 2)
+        # No .env (a stripped checkout, or a git worktree): the fallback has to
+        # be the PRODUCT's, because src/config.ts resolves it as
+        # `env['MAIN_AGENT_ID'] ?? 'marveen'`. On such an install "marveen" is
+        # the registered main agent, so the POST is accepted; anything else we
+        # invented here would be rejected with 403.
+        check_eq("falls back exactly like src/config.ts", gate.AGENT, "marveen")
 
     check_eq(
-        "not an upstream placeholder",
-        gate.AGENT not in {"picard", "geordi", "seven", "samu", "boni", "marveen"},
+        "not a name from another install",
+        gate.AGENT not in {"picard", "geordi", "seven", "samu", "boni"},
         True,
     )
+
+
+def scenario_env_shapes() -> None:
+    """A hand-edited .env is not always `KEY=value` on a bare line.
+
+    Asked for in review: the reader has to survive `export `, quotes and a
+    trailing comment. Each of these was a silent wrong answer before -- the
+    line simply did not match, and the gate fell back to the default while a
+    perfectly good id sat in the file.
+    """
+    print("the .env reader handles export, quotes and trailing comments")
+    import tempfile, pathlib
+    esetek = [
+        ("MAIN_AGENT_ID=sima\n", "sima"),
+        ("export MAIN_AGENT_ID=exportalt\n", "exportalt"),
+        ('MAIN_AGENT_ID="idezett"\n', "idezett"),
+        ("MAIN_AGENT_ID=kommentes  # ez itt megjegyzes\n", "kommentes"),
+        ('MAIN_AGENT_ID="ra#cs"  # a kettes a kommentben\n', "ra#cs"),
+        ("  export   MAIN_AGENT_ID = 'mind'   \n", None),   # szokoz az = korul: NEM kezeljuk
+        ("BOT_NAME=Valami\n", "marveen"),                   # nincs kulcs -> a termek alapertelmezese
+    ]
+    eredeti = gate.MARVEEN_DIR
+    with tempfile.TemporaryDirectory() as d:
+        gate.MARVEEN_DIR = pathlib.Path(d)
+        for tartalom, vart in esetek:
+            (gate.MARVEEN_DIR / ".env").write_text(tartalom, encoding="utf-8")
+            kapott = gate.main_agent_id()
+            cimke = tartalom.strip().replace("\n", " ")[:38]
+            if vart is None:
+                # Kimondva, hogy MIT NEM tud: a `KEY = value` alak (szokoz az
+                # egyenlosegjel korul) nem ervenyes a .env-ben sem, es a
+                # termek olvasoja sem fogadja el. Nem hallgatolagos hianyossag.
+                check_eq(f"nem kezeli (es ez szandekos): {cimke}", kapott, "marveen")
+            else:
+                check_eq(f"{cimke} -> {vart}", kapott, vart)
+    gate.MARVEEN_DIR = eredeti
+
+
+def scenario_sender_is_the_agent_id() -> None:
+    """The SENDER is the agent id too, not a readable label.
+
+    Measured on the live dashboard 2026-09-25: from=memoria-gate answers HTTP
+    403, from=<the install's main agent> answers 200. The API accepts only a
+    registered fleet agent id. A label like "memoria-gate" reads nicely and
+    loses the message -- the same failure as the old hardcoded name, one step
+    further along. Nothing pinned this before, which is why it survived review.
+    """
+    print("the wake-up message is sent AS the agent, not as a label")
+    kuldott = {}
+
+    class Valasz:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def hamis(req, timeout=None):
+        import json as _json
+        kuldott.update(_json.loads(req.data.decode()))
+        return Valasz()
+
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        con, _ = wire(tmp)          # DB es token kell, kulonben a token-olvasas dob
+        add_conv(con)
+        # A wire() KICSERELI a wake_agent-et egy naplozo lambdara, tehat itt az
+        # IMPORTKOR elkapott VALODIT kell hivni -- kulonben ez az eset nemán
+        # semmit sem mer. (Ugyanez a csapda a garmin-teszt notify_seven-jenel.)
+        eredeti_urlopen = gate.urllib.request.urlopen
+        gate.urllib.request.urlopen = hamis
+        try:
+            VALODI_WAKE({"conversation_log": 0, "tool_call_log": 0},
+                        {"conversation_log": 1, "tool_call_log": 0})
+        finally:
+            gate.urllib.request.urlopen = eredeti_urlopen
+    check_eq("from is the agent id", kuldott.get("from"), gate.AGENT)
+    check_eq("to is the agent id", kuldott.get("to"), gate.AGENT)
+    check_eq("not a descriptive label", kuldott.get("from") in {"memoria-gate", "geordi"}, False)
 
 
 if __name__ == "__main__":
@@ -438,6 +513,8 @@ if __name__ == "__main__":
         scenario_mark_seen_requires_conv_upto,
         scenario_conv_upto_clamped,
         scenario_agent_id_comes_from_env,
+        scenario_env_shapes,
+        scenario_sender_is_the_agent_id,
     ):
         scenario()
         print()
