@@ -32,17 +32,34 @@ MARK="waitfor-marker-$$-$RANDOM"
 # If this fails, every check below is vacuous: there would be no trap to avoid.
 naive_rc=0
 timeout 3 bash -c "until ! pgrep -f 'pgrep-self-probe-$MARK' >/dev/null 2>&1; do sleep 1; done" || naive_rc=$?
-ok "positive control: naive 'until ! pgrep -f PAT' hangs on its own command line" \
-   "$([ "$naive_rc" = "124" ] && echo 0 || echo 1)" "rc=$naive_rc (expected 124 = timeout)"
 # CONTROL-UNMET is an INSTRUMENT verdict, not a test failure, and it must never
 # be reported as a green suite: if the trap does not reproduce on this platform,
-# then every assertion below about avoiding it proves nothing here. Exit 2 (the
-# usage/instrument code), distinct from 1 (a real failure).
+# then every assertion below about avoiding it proves nothing here.
+#
+# IT IS A SKIP, NOT A FAILURE (asked for in the 2026-09-25 re-review, and the
+# reviewer measured why). On macOS `pgrep` does not see the calling shell, so
+# the naive loop exits 0 instead of hanging: the trap simply does not exist
+# there. The suite was exiting 2, script-tests-runner requires 0, and the whole
+# vitest run went red on every macOS machine -- for a platform where the script
+# under test is CORRECT. A red that means "could not measure here" is a false
+# alarm, and a false alarm costs the same attention as a real one.
+#
+# Exit 77 is the SKIP code (the autotools convention), and it is deliberately
+# NOT 0: a skipped suite must not be indistinguishable from a passing one. That
+# silent-skip shape is the failure this fleet keeps paying for. The runner
+# reports it as SKIPPED and requires the reason below to be printed.
+# The control is checked BEFORE it is recorded as an assertion. Reporting a
+# FAIL line and then exiting SKIP contradicts itself on the same screen, and the
+# reader has to decide which half to believe. An unmet control is not a failed
+# assertion -- it is the instrument saying it cannot measure here.
 if [ "$naive_rc" != "124" ]; then
-    echo "CONTROL-UNMET: the self-match trap did not reproduce on this platform (rc=$naive_rc)." >&2
-    echo "  Everything below would be vacuous here, so this suite makes no claim. Report the rc." >&2
-    exit 2
+    echo "SKIP (control unmet): the self-match trap did not reproduce on this platform (rc=$naive_rc)." >&2
+    echo "  Everything below would be vacuous here, so this suite makes NO CLAIM on this machine." >&2
+    echo "  This is not a pass and not a failure: nothing was measured. Report the rc." >&2
+    exit 77
 fi
+ok "positive control: naive 'until ! pgrep -f PAT' hangs on its own command line" \
+   "$([ "$naive_rc" = "124" ] && echo 0 || echo 1)" "rc=$naive_rc (expected 124 = timeout)"
 
 # --- 2. The same pattern through wait-for.sh must return at once. ------------
 t0=$(date +%s); rc=0
