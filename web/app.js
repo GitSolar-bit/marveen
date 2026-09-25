@@ -12339,7 +12339,16 @@ function renderUpdatesBadge(status) {
 // Dev machines follow develop on purpose; one dismissal silences the banner
 // for them while the Updates-page notice stays as the quiet ground truth.
 const BRANCH_DRIFT_DISMISS_PREFIX = 'marveen.branch-drift-dismissed.'
-const BRANCH_HEAL_COMMAND = 'git checkout main && bash update.sh'
+// The heal command has to work in BOTH states, and `git checkout main` works in
+// neither of them reliably here: with two remotes that both carry main (origin
+// and a fork) git cannot infer the branch to follow and exits 128, and
+// `checkout -b main --track origin/main` only works the FIRST time -- run it
+// again on an install that already has a local main and it exits 128 with
+// "a branch named 'main' already exists". Measured 2026-09-25 in an isolated
+// two-remote repo, git 2.53.0. `switch` then `switch -c` covers both, and the
+// `(A || B) && C` precedence is what keeps update.sh from running when neither
+// switch succeeded.
+const BRANCH_HEAL_COMMAND = 'git switch main || git switch -c main --track origin/main && bash update.sh'
 
 function branchDriftDismissed(branch) {
   try { return localStorage.getItem(BRANCH_DRIFT_DISMISS_PREFIX + branch) === '1' } catch { return false }
