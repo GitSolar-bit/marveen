@@ -56,6 +56,31 @@ PENDING_FILE = GARMIN_DIR / "pending_run_analysis.txt"
 MARVEEN_DIR = Path(__file__).resolve().parents[1]
 TOKEN_FILE = MARVEEN_DIR / "store" / ".dashboard-token"
 MESSAGES_URL = "http://localhost:3420/api/messages"
+
+def main_agent_id() -> str:
+    """The installation's own main-agent id, read at call time.
+
+    BEEGETETT913: this used to be a hardcoded agent name from the upstream
+    install. A name that does not exist here is not a loud failure -- the
+    dashboard accepts the POST and the message lands in a mailbox nobody
+    reads, so the alert is lost exactly when it matters.
+
+    The .env is the only authority, and there is DELIBERATELY no default:
+    substituting one install's name for another is the same defect with a
+    different value, and it would restore the silent loss this fixes. An
+    empty return is the caller's signal to refuse loudly.
+    """
+    env = MARVEEN_DIR / ".env"
+    try:
+        for line in env.read_text(encoding="utf-8").splitlines():
+            if line.startswith("MAIN_AGENT_ID="):
+                value = line.split("=", 1)[1].strip().strip("\"'")
+                if value:
+                    return value
+    except OSError:
+        pass
+    return ""
+
 # Proof-of-life artefact: its mtime answers "did the silent path actually run
 # today", which "is the task enabled" does not.
 HEARTBEAT_FILE = MARVEEN_DIR / "store" / "garmin-run-gate-last.txt"
@@ -105,11 +130,19 @@ def current_activity_id() -> str:
 
 def notify_seven(activity_id: str) -> None:
     """Wake Seven. Raises on any failure so the caller can roll the state back."""
+    recipient = main_agent_id()
+    if not recipient:
+        # Raising is the loud path: the caller rolls the state back, so the
+        # next run retries instead of marking this activity as handled.
+        raise RuntimeError(
+            "MAIN_AGENT_ID is not set in the install's .env; refusing to send "
+            "the notification to a guessed recipient"
+        )
     token = TOKEN_FILE.read_text().strip()
     payload = json.dumps(
         {
-            "from": "geordi",
-            "to": "seven",
+            "from": "garmin-gate",
+            "to": recipient,
             "content": NOTIFY_TEMPLATE.format(
                 activity_id=activity_id, pending=PENDING_FILE
             ),

@@ -26,6 +26,8 @@ SPEC = importlib.util.spec_from_file_location(
 gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 
+VALODI_NOTIFY = gate.notify_seven  # captured before any scenario rebinds it
+
 FAILURES: list[str] = []
 
 
@@ -146,6 +148,46 @@ def scenario_no_state_file() -> None:
         check("state file gone again", gate.STATE_FILE.exists(), False)
 
 
+def scenario_missing_agent_id_refuses() -> None:
+    """BEEGETETT913: with no MAIN_AGENT_ID the gate must refuse, never guess.
+
+    Every other scenario replaces notify_seven outright, so this is the only
+    one that runs the real function -- which is exactly why the recipient
+    check needs its own scenario. A guessed name is not a loud failure: the
+    dashboard accepts the POST and the message waits in a mailbox nobody
+    reads, so the run looks delivered and the alert is lost.
+
+    The refusal also has to come BEFORE the token is read, hence the token
+    file is pointed at a path that does not exist: if the code got that far,
+    the error would be FileNotFoundError instead of RuntimeError.
+    """
+    print("no MAIN_AGENT_ID -> notify refuses, state rolled back")
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        wire(tmp, fake_analysis_script(tmp, 2, "333"))
+        gate.STATE_FILE.write_text(json.dumps({"last_activity_id": "111"}))
+        gate.notify_seven = VALODI_NOTIFY
+        gate.TOKEN_FILE = tmp / "no-such-token"
+        eredeti = gate.main_agent_id
+        gate.main_agent_id = lambda: ""
+        try:
+            baj = None
+            try:
+                gate.notify_seven("333")
+            except Exception as exc:  # noqa: BLE001 - the type IS the assertion
+                baj = exc
+            check("raises RuntimeError", type(baj).__name__, "RuntimeError")
+            check("names the missing setting", "MAIN_AGENT_ID" in str(baj), True)
+            check("exit code", gate.main(), 1)
+            check(
+                "state rolled back",
+                json.loads(gate.STATE_FILE.read_text())["last_activity_id"],
+                "111",
+            )
+        finally:
+            gate.main_agent_id = eredeti
+
+
 if __name__ == "__main__":
     for scenario in (
         scenario_nothing_new,
@@ -153,6 +195,7 @@ if __name__ == "__main__":
         scenario_notify_fails,
         scenario_crash,
         scenario_no_state_file,
+        scenario_missing_agent_id_refuses,
     ):
         scenario()
         print()

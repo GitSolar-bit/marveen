@@ -52,7 +52,12 @@ def build_db(path: Path) -> sqlite3.Connection:
     return con
 
 
-def add_conv(con, agent="picard", direction="in") -> None:
+def add_conv(con, agent=None, direction="in") -> None:
+    # BEEGETETT913: the agent id used to be hardcoded here AND in the gate.
+    # When the gate started reading it from .env, this test kept inserting
+    # the old name and the SQL filter matched nothing -- the gate looked
+    # broken while it was the fixture that was stale. Follow the gate.
+    agent = agent or gate.AGENT
     con.execute(
         "INSERT INTO conversation_log (agent_id, chat_id, direction, created_at) "
         "VALUES (?, 'c', ?, 0)",
@@ -61,7 +66,8 @@ def add_conv(con, agent="picard", direction="in") -> None:
     con.commit()
 
 
-def add_tool(con, agent="picard", summary="ls") -> None:
+def add_tool(con, agent=None, summary="ls") -> None:
+    agent = agent or gate.AGENT
     con.execute(
         "INSERT INTO tool_call_log (session_id, tool_name, success, created_at, agent_id, "
         "input_summary) VALUES ('s', 'Bash', 1, 0, ?, ?)",
@@ -374,6 +380,46 @@ def scenario_conv_upto_clamped() -> None:
         )
 
 
+def scenario_agent_id_comes_from_env() -> None:
+    """BEEGETETT913: the recipient must not be a hardcoded upstream name.
+
+    The other scenarios follow gate.AGENT wherever it points, so they pass
+    with ANY value -- including the old hardcoded one. This is the scenario
+    that looks at the value itself. A name that does not exist on this install
+    is not a loud failure: the dashboard accepts the POST and the wake-up lands
+    in a mailbox nobody reads, so the gate goes quiet exactly when it matters.
+    """
+    print("the agent id is read from .env, not hardcoded")
+    env = gate.MARVEEN_DIR / ".env"
+    expected = None
+    try:
+        for line in env.read_text(encoding="utf-8").splitlines():
+            if line.startswith("MAIN_AGENT_ID="):
+                expected = line.split("=", 1)[1].strip().strip("\"'")
+                break
+    except OSError:
+        pass
+
+    if expected:
+        check_eq("AGENT matches .env MAIN_AGENT_ID", gate.AGENT, expected)
+        check_eq("main_agent_id() agrees", gate.main_agent_id(), expected)
+    else:
+        # No .env (a stripped checkout, or a git worktree): there must be NO
+        # default at all. Any name we could put here would belong to one
+        # install and be wrong on every other one, which is the defect itself.
+        check_eq("no guessed default", gate.AGENT, "")
+        check_eq("main_agent_id() agrees", gate.main_agent_id(), "")
+        # And the refusal has to be LOUD: a silent empty filter matches no
+        # rows, so the gate would report "nothing happened" forever.
+        check_eq("main() refuses instead of running", gate.main([]), 2)
+
+    check_eq(
+        "not an upstream placeholder",
+        gate.AGENT not in {"picard", "geordi", "seven", "samu", "boni", "marveen"},
+        True,
+    )
+
+
 if __name__ == "__main__":
     for scenario in (
         scenario_quiet,
@@ -391,6 +437,7 @@ if __name__ == "__main__":
         scenario_midturn_message_survives_mark_seen,
         scenario_mark_seen_requires_conv_upto,
         scenario_conv_upto_clamped,
+        scenario_agent_id_comes_from_env,
     ):
         scenario()
         print()
