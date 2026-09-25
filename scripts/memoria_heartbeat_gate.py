@@ -144,7 +144,36 @@ TOKEN_FILE = MARVEEN_DIR / "store" / ".dashboard-token"
 MARKER_FILE = MARVEEN_DIR / "store" / "memoria-heartbeat-gate-last.txt"
 MESSAGES_URL = "http://localhost:3420/api/messages"
 
-AGENT = "picard"
+def main_agent_id() -> str:
+    """The installation's own main-agent id, read at call time.
+
+    BEEGETETT913: this used to be a hardcoded agent name from the upstream
+    install. A name that does not exist here is not a loud failure -- the
+    dashboard accepts the POST and the message lands in a mailbox nobody
+    reads, so the alert is lost exactly when it matters.
+
+    The .env is the only authority, and there is DELIBERATELY no default:
+    substituting one install's name for another is the same defect with a
+    different value, and it would restore the silent loss this fixes. An
+    empty return is the caller's signal to refuse loudly.
+    """
+    env = MARVEEN_DIR / ".env"
+    try:
+        for line in env.read_text(encoding="utf-8").splitlines():
+            if line.startswith("MAIN_AGENT_ID="):
+                value = line.split("=", 1)[1].strip().strip("\"'")
+                if value:
+                    return value
+    except OSError:
+        pass
+    return ""
+
+
+# Resolved once at import: AGENT is not only the message recipient, it is
+# also the SQL filter in the activity queries below. A None here does not
+# fail -- it silently matches no rows, so the gate would report "no
+# activity" forever. Caught by scripts/test_memoria_heartbeat_gate.py.
+AGENT = main_agent_id()
 
 # The agent's own `--mark-seen` call is logged by the PostToolUse hook AFTER
 # this script has read the maximum, so the marker can never cover it and the
@@ -271,7 +300,7 @@ def wake_agent(seen: dict[str, int], maxima: dict[str, int]) -> None:
         tool_max=maxima["tool_call_log"],
         tool_new=count_new(seen["tool_call_log"], "tool_call_log"),
     )
-    payload = json.dumps({"from": "geordi", "to": AGENT, "content": content}).encode()
+    payload = json.dumps({"from": "memoria-gate", "to": AGENT, "content": content}).encode()
     req = urllib.request.Request(
         MESSAGES_URL,
         data=payload,
@@ -374,6 +403,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.conv_upto is not None and not args.mark_seen:
         parser.error("--conv-upto only means anything together with --mark-seen")
+
+    # AGENT is the SQL filter as well as the recipient, and an empty filter
+    # does not fail -- it matches no rows, and the gate would report "no
+    # activity" forever. Refuse here, where it is visible in the cron log.
+    if not AGENT:
+        print(
+            "MAIN_AGENT_ID is not set in the install's .env; refusing to run "
+            "with an unknown agent id",
+            file=sys.stderr,
+        )
+        return 2
 
     return mark_seen(args.conv_upto) if args.mark_seen else check()
 
