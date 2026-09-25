@@ -190,11 +190,41 @@ TOKEN_FILE="$PROD_ROOT/store/.dashboard-token"
 [ -r "$TOKEN_FILE" ] || exit 0
 # 'from' must be a registered fleet agent id (the API rejects made-up names,
 # measured 2026-08-22) -- the source is named in the content prefix instead.
+# It therefore comes from the SAME resolved id as the recipient, and for the
+# same reason: a name belonging to another install is rejected outright. The
+# dashboard answers HTTP 403 "unknown agent" to a hardcoded one, so fixing the
+# recipient and leaving the sender would have moved the failure, not removed
+# it -- and the installer rewrites this hook unconditionally, so the first
+# update after a merge would have put the broken sender back.
 # The alert MUST name the tree it fired in: without it a test alert raised
 # from a scratch root is word-for-word identical to a real one, and the
 # reader starts an investigation (cost one wasted round on 2026-08-22).
 ORIGIN="${MARVEEN_DASHBOARD_ORIGIN:-http://localhost:3420}"
-ALERT_TO="${MARVEEN_GUARD_ALERT_TO:-marveen}"
+# THE RECIPIENT IS THIS INSTALL'S OWN MAIN AGENT, and there is deliberately no
+# default name. This line used to read `${MARVEEN_GUARD_ALERT_TO:-marveen}`,
+# and a name belonging to a different install is not a loud failure here: the
+# dashboard accepts the POST and the branch-switch alert waits in a mailbox
+# nobody reads -- the silent non-enforcement this guard exists to prevent.
+#
+# The environment variable still WINS where it is set (that is how a test, or
+# a second tree, points the alert elsewhere); the .env of the tree the hook
+# fired in is the default underneath it. Reading it at RUN time, not at
+# install time, means renaming the main agent does not require reinstalling
+# the hook.
+# SENDER AND RECIPIENT ARE RESOLVED SEPARATELY, and that separation is the
+# point. MARVEEN_GUARD_ALERT_TO redirects WHO IS TOLD -- that is what its name
+# says and all it may do. If it also set the sender, then pointing a second
+# tree's alerts at another agent would make those alerts APPEAR TO COME FROM
+# that agent: the supervisory system writing under someone else's name, which
+# is the exact defect GATESENDER922 removed from the restart gate. Letting a
+# convenience variable reintroduce it through the back door is worse than the
+# hardcoded name was, because it looks like configuration.
+ALERT_FROM=""
+if [ -r "$PROD_ROOT/.env" ]; then
+  ALERT_FROM="$(sed -n 's/^MAIN_AGENT_ID=[[:space:]]*//p' "$PROD_ROOT/.env" 2>/dev/null \
+    | head -1 | tr -d '\042\047\r' | sed 's/[[:space:]]*$//')"
+fi
+ALERT_TO="${MARVEEN_GUARD_ALERT_TO:-$ALERT_FROM}"
 # Honest delivery (NOTIFYVAKSWEEP826): the alert POST used to be fire-and-
 # forget -- a failed send left the branch-switch alert lost with no trace.
 # The hook stays exit-0 (a guard must not break git), but a delivery failure
@@ -212,10 +242,23 @@ ALERT_TO="${MARVEEN_GUARD_ALERT_TO:-marveen}"
 # to an attacker-named agent. Same rule as scripts/agent-msg.sh: the values
 # travel in the ENVIRONMENT and json.dumps does the quoting.
 ALERT_TEXT="[PROD-FA ORSEG, post-checkout hook] Fa: $TOPLEVEL -- agat valtott a(z) $BRANCH agra. (Ha ez az utvonal nem a telepites fo faja, ez PROBA, nem eles riasztas.) AUTO-VISSZAALLITAS: $REVERTED. Commitot a pre-commit hook blokkol; szandekos valtashoz MARVEEN_PROD_CHECKOUT_OK=1."
+# THE SECOND HALF OF THIS CONDITION IS UNREACHABLE, ON PURPOSE. ALERT_TO falls
+# back to ALERT_FROM above, so it can only be empty when ALERT_FROM already is,
+# and the first half has caught that. It stays as a backstop against a future
+# edit that changes the fallback -- but nobody should count it as a second
+# gate: the sender check is the one doing the work, and it is the one the test
+# "a recipient from the variable is NOT enough" pins.
+if [ -z "$ALERT_FROM" ] || [ -z "$ALERT_TO" ]; then
+  # No recipient, no guess. The person who caused the switch is standing at
+  # this terminal, so the alert goes to THEM on stderr rather than to an
+  # invented mailbox. Still exit 0: a guard must not break git.
+  echo "[prod-tree-guard] FIGYELEM: nincs feladhato riasztas -- MAIN_AGENT_ID nincs a(z) $PROD_ROOT/.env fajlban (a felado CSAK onnan jon), ezert a riasztas NEM ment el senkinek. $ALERT_TEXT" >&2
+  exit 0
+fi
 GUARD_BODY=""
 if command -v python3 >/dev/null 2>&1; then
-  GUARD_BODY="$(GUARD_TO="$ALERT_TO" GUARD_TEXT="$ALERT_TEXT" python3 -c 'import json,os,sys
-sys.stdout.write(json.dumps({"from":"marveen","to":os.environ["GUARD_TO"],"content":os.environ["GUARD_TEXT"]}))' 2>/dev/null)" || GUARD_BODY=""
+  GUARD_BODY="$(GUARD_FROM="$ALERT_FROM" GUARD_TO="$ALERT_TO" GUARD_TEXT="$ALERT_TEXT" python3 -c 'import json,os,sys
+sys.stdout.write(json.dumps({"from":os.environ["GUARD_FROM"],"to":os.environ["GUARD_TO"],"content":os.environ["GUARD_TEXT"]}))' 2>/dev/null)" || GUARD_BODY=""
 fi
 if [ -z "$GUARD_BODY" ]; then
   # No encoder, no send: a body the shell glued together is exactly what this
