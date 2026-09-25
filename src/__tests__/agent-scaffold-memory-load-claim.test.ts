@@ -45,6 +45,14 @@ function hookCommands(settingsPath: string): Array<{ event: string; text: string
   return out
 }
 
+// Hooks that may name the endpoint because they only PRINT a recipe for the agent
+// to run, and load nothing themselves. Each entry carries its reason.
+const RECIPE_PRINTERS: Record<string, string> = {
+  'scripts/hooks/memory-lookup-nudge.py':
+    'on a human message it prints the search recipe; the agent runs it and picks the keyword (TG 16727)',
+}
+const isExemptPrinter = (rel: string) => rel in RECIPE_PRINTERS
+
 // Each mention of the endpoint, with the curl command it sits in (same line), or
 // the bare line when no curl precedes it there.
 function memoryMentions(text: string): string[] {
@@ -103,14 +111,22 @@ describe('...and that stays true (update the scaffold sentence if one of these f
     const scripts = new Set<string>()
     for (const h of hookCommands(join(ROOT, file))) for (const m of h.text.matchAll(/scripts\/[\w./-]+\.(?:py|sh|mjs|js|ts)/g)) scripts.add(m[0])
     expect(scripts.size, 'no script path parsed from the hooks: the parser is blind').toBeGreaterThan(0)
-    const hits = [...scripts].filter((rel) => existsSync(join(ROOT, rel)) && /api\/memories/.test(readFileSync(join(ROOT, rel), 'utf-8')))
+    const hits = [...scripts].filter((rel) => existsSync(join(ROOT, rel)) && !isExemptPrinter(rel) && /api\/memories/.test(readFileSync(join(ROOT, rel), 'utf-8')))
     expect(hits).toEqual([])
   })
 
   it('no file under scripts/hooks names the memories endpoint', () => {
     const dir = join(ROOT, 'scripts', 'hooks')
-    const hits = readdirSync(dir).filter((n) => statSync(join(dir, n)).isFile() && /api\/memories/.test(readFileSync(join(dir, n), 'utf-8')))
+    const hits = readdirSync(dir).filter((n) => statSync(join(dir, n)).isFile() && !isExemptPrinter(`scripts/hooks/${n}`) && /api\/memories/.test(readFileSync(join(dir, n), 'utf-8')))
     expect(hits).toEqual([])
+  })
+
+  // An exemption must not become the loophole: an exempt hook may PRINT the
+  // endpoint (a recipe the agent runs itself), but it may not reach it.
+  it.each(Object.keys(RECIPE_PRINTERS))('exempt %s only prints: no network, DB, subprocess or dynamic code on any line', (rel) => {
+    const src = readFileSync(join(ROOT, rel), 'utf-8')
+    expect(src).toMatch(/api\/memories/) // stale-exemption guard: drop the entry when this stops holding
+    expect(src).not.toMatch(/urlopen|urllib|http\.client|HTTPConnection|(?:from|import)\s+http\b|httplib|socket|sqlite3|subprocess|\brequests\b|os\.system|os\.popen|os\.exec|os\.spawn|popen|__import__|importlib|asyncio|open_connection|\b(?:exec|eval|compile)\s*\(/)
   })
 })
 
