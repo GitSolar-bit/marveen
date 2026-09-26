@@ -34,7 +34,12 @@ let server: Server
 let origin = ''
 
 /** The ids this stand-in dashboard knows. Everything else is a stranger. */
-const KNOWN_AGENTS = new Set(['sajat-agens', 'idezett-agens', 'env-fajlbol', 'valtozobol', 'probanev', 'alert-recipient'])
+const KNOWN_AGENTS = new Set(['sajat-agens', 'idezett-agens', 'env-fajlbol', 'valtozobol', 'probanev', 'alert-recipient',
+  // A deployment that HAS registered the guard in SYSTEM_SENDER_IDS. On this
+  // install it is not registered, and the live dashboard answers 403 to it
+  // (measured 2026-09-26) -- which is why the hook must read the list instead
+  // of assuming either answer.
+  'prod-tree-guard'])
 
 beforeAll(async () => {
   server = createServer((req, res) => {
@@ -212,5 +217,98 @@ describe('prod-tree-guard post-checkout alert: the recipient comes from the inst
     expect(bodies).toEqual([])
     expect(stderr).toContain('[prod-tree-guard]')
     expect(stderr).toContain('feature-ordinary')
+  })
+})
+
+describe('prod-tree-guard post-checkout alert: the SENDER is read from SYSTEM_SENDER_IDS, not assumed', () => {
+  // The review on #1584 asked for `from=prod-tree-guard` on the grounds that the
+  // id "is already in SYSTEM_SENDER_IDS". Measured 2026-09-26 on this install it
+  // is not: the .env has no SYSTEM_SENDER_IDS line at all, the config default is
+  // an empty set, there is no agents/prod-tree-guard/ directory, and the live
+  // dashboard answers HTTP 403 "unknown agent 'prod-tree-guard'" while the .env
+  // MAIN_AGENT_ID is accepted. Hardcoding either answer is wrong for somebody:
+  // the guard name silences installs that never registered it, and the main
+  // agent id denies the honest sender to installs that did. So the hook reads
+  // the list, and these cases pin both directions.
+
+  it('with the guard registered, it sends under its OWN name', async () => {
+    const repo = makeRepo('MAIN_AGENT_ID=sajat-agens\nSYSTEM_SENDER_IDS=prod-tree-guard\n')
+    const { bodies, rejected } = await switchTo(repo, 'feature-ordinary', {})
+    expect(rejected).toEqual([])
+    expect(bodies.length).toBe(1)
+    expect(JSON.parse(bodies[0]).from).toBe('prod-tree-guard')
+  })
+
+  it('the list is parsed the way the server parses it: commas, spaces, several entries', async () => {
+    // Same normalisation as parseSystemSenderIds over sanitizeAgentIdent: split
+    // on commas, trim, drop characters outside [A-Za-z0-9_-]. If this hook were
+    // laxer than the server, it would pick a spelling the API then refuses --
+    // the silent loss again, one layer down.
+    const repo = makeRepo('MAIN_AGENT_ID=sajat-agens\nSYSTEM_SENDER_IDS=cortex, prod-tree-guard ,billing\n')
+    const { bodies, rejected } = await switchTo(repo, 'feature-ordinary', {})
+    expect(rejected).toEqual([])
+    expect(bodies.length).toBe(1)
+    expect(JSON.parse(bodies[0]).from).toBe('prod-tree-guard')
+  })
+
+  it('with a SYSTEM_SENDER_IDS that does NOT list the guard, the sender stays the install id', async () => {
+    const repo = makeRepo('MAIN_AGENT_ID=sajat-agens\nSYSTEM_SENDER_IDS=cortex,billing\n')
+    const { bodies, rejected } = await switchTo(repo, 'feature-ordinary', {})
+    expect(rejected).toEqual([])
+    expect(bodies.length).toBe(1)
+    expect(JSON.parse(bodies[0]).from).toBe('sajat-agens')
+  })
+
+  it('with no SYSTEM_SENDER_IDS line at all -- this install -- the sender is the install id', async () => {
+    // The configuration this host actually has. A regression here is the one
+    // that would take the alert away from us specifically.
+    const repo = makeRepo('BOT_NAME=Probe\nMAIN_AGENT_ID=sajat-agens\n')
+    const { bodies, rejected } = await switchTo(repo, 'feature-ordinary', {})
+    expect(rejected).toEqual([])
+    expect(bodies.length).toBe(1)
+    expect(JSON.parse(bodies[0]).from).toBe('sajat-agens')
+  })
+
+  it('THE GUARD IS NEVER THE RECIPIENT OF ITS OWN ALERT', async () => {
+    // The trap this change had to avoid. The recipient line used to read
+    // `${MARVEEN_GUARD_ALERT_TO:-$ALERT_FROM}`, which was harmless while the
+    // sender could only be the main agent -- the two were the same value. Once
+    // the sender can be the guard, that same line addresses the alert to the
+    // guard itself: a mailbox with no reader, and the hook reports success.
+    // If anyone restores the old fallback, this case goes red.
+    const repo = makeRepo('MAIN_AGENT_ID=sajat-agens\nSYSTEM_SENDER_IDS=prod-tree-guard\n')
+    const { bodies } = await switchTo(repo, 'feature-ordinary', {})
+    expect(bodies.length).toBe(1)
+    const p = JSON.parse(bodies[0])
+    expect(p.from).toBe('prod-tree-guard')
+    expect(p.to).toBe('sajat-agens')
+    expect(p.to).not.toBe('prod-tree-guard')
+  })
+
+  it('a registered sender with NO recipient sends nothing and says so', async () => {
+    // NEWLY REACHABLE, and the reason the "second half" of the refusal in the
+    // hook stopped being dead code. The sender resolves (the guard is listed),
+    // the recipient does not (no MAIN_AGENT_ID, no override). Before this
+    // change that combination could not occur, because the recipient fell back
+    // to the sender.
+    const repo = makeRepo('SYSTEM_SENDER_IDS=prod-tree-guard\n')
+    const { bodies, rejected, stderr } = await switchTo(repo, 'feature-ordinary', {}, false)
+    expect(rejected).toEqual([])
+    expect(bodies).toEqual([])
+    expect(stderr).toContain('[prod-tree-guard]')
+    expect(stderr).toContain('MAIN_AGENT_ID')
+  })
+
+  it('a registered sender plus an override recipient does go out', async () => {
+    // The mirror of the case above: the same install, one variable set. This
+    // proves the refusal above is about a MISSING recipient, not about the
+    // guard sender being rejected somewhere in the hook.
+    const repo = makeRepo('SYSTEM_SENDER_IDS=prod-tree-guard\n')
+    const { bodies, rejected } = await switchTo(repo, 'feature-ordinary', { MARVEEN_GUARD_ALERT_TO: 'valtozobol' })
+    expect(rejected).toEqual([])
+    expect(bodies.length).toBe(1)
+    const p = JSON.parse(bodies[0])
+    expect(p.from).toBe('prod-tree-guard')
+    expect(p.to).toBe('valtozobol')
   })
 })

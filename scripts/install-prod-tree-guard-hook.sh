@@ -219,12 +219,52 @@ ORIGIN="${MARVEEN_DASHBOARD_ORIGIN:-http://localhost:3420}"
 # is the exact defect GATESENDER922 removed from the restart gate. Letting a
 # convenience variable reintroduce it through the back door is worse than the
 # hardcoded name was, because it looks like configuration.
-ALERT_FROM=""
+# THE GUARD SENDS UNDER ITS OWN NAME WHERE THAT NAME IS REGISTERED, and under
+# the install's main agent id where it is not. Measured 2026-09-26 against the
+# live dashboard: `from=prod-tree-guard` is answered HTTP 403 "unknown agent"
+# here, while `from=<the .env MAIN_AGENT_ID>` is accepted. The sender check
+# (src/web/routes/messages.ts) accepts the owner, an id listed in
+# SYSTEM_SENDER_IDS, the voice channel, or a directory under agents/ -- and
+# SYSTEM_SENDER_IDS is EMPTY by default (src/config.ts), with no
+# agents/prod-tree-guard/ directory anywhere in the tree.
+#
+# So HARDCODING the guard name would repeat, under a new name, the exact defect
+# card ecb62920 closed when it moved `from=marveen` to the install's own id: a
+# sender the API refuses, and a guard that reverts a branch switch but can never
+# say so. READING THE LIST instead satisfies both halves -- a deployment that
+# registers the guard gets the honest sender it asked for, and one that does not
+# keeps an alert that arrives.
+ENV_MAIN_ID=""
+ENV_SYSTEM_SENDERS=""
 if [ -r "$PROD_ROOT/.env" ]; then
-  ALERT_FROM="$(sed -n 's/^MAIN_AGENT_ID=[[:space:]]*//p' "$PROD_ROOT/.env" 2>/dev/null \
+  ENV_MAIN_ID="$(sed -n 's/^MAIN_AGENT_ID=[[:space:]]*//p' "$PROD_ROOT/.env" 2>/dev/null \
     | head -1 | tr -d '\042\047\r' | sed 's/[[:space:]]*$//')"
+  ENV_SYSTEM_SENDERS="$(sed -n 's/^SYSTEM_SENDER_IDS=[[:space:]]*//p' "$PROD_ROOT/.env" 2>/dev/null \
+    | head -1 | tr -d '\042\047\r')"
 fi
-ALERT_TO="${MARVEEN_GUARD_ALERT_TO:-$ALERT_FROM}"
+GUARD_SENDER_ID="prod-tree-guard"
+# The SAME normalisation the server applies, so this cannot accept a spelling
+# the API would then refuse: parseSystemSenderIds (src/config.ts) splits on
+# commas and trims, sanitizeAgentIdent (src/prompt-safety.ts) drops every
+# character outside [A-Za-z0-9_-]. Case is significant there, so it is here.
+ALERT_FROM="$ENV_MAIN_ID"
+_ifs_saved="$IFS"
+IFS=','
+for _sender in $ENV_SYSTEM_SENDERS; do
+  _sender="$(printf '%s' "$_sender" | tr -dc 'A-Za-z0-9_-')"
+  if [ "$_sender" = "$GUARD_SENDER_ID" ]; then
+    ALERT_FROM="$GUARD_SENDER_ID"
+    break
+  fi
+done
+IFS="$_ifs_saved"
+# THE RECIPIENT COMES FROM MAIN_AGENT_ID, NEVER FROM ALERT_FROM. This used to
+# read `${MARVEEN_GUARD_ALERT_TO:-$ALERT_FROM}`, which was the same value back
+# when the sender could only be the main agent. It is not the same value any
+# more: with the guard registered, that form would address the alert TO THE
+# GUARD ITSELF -- a mailbox with no reader, which is the silent loss this whole
+# change exists to remove.
+ALERT_TO="${MARVEEN_GUARD_ALERT_TO:-$ENV_MAIN_ID}"
 # Honest delivery (NOTIFYVAKSWEEP826): the alert POST used to be fire-and-
 # forget -- a failed send left the branch-switch alert lost with no trace.
 # The hook stays exit-0 (a guard must not break git), but a delivery failure
@@ -242,17 +282,18 @@ ALERT_TO="${MARVEEN_GUARD_ALERT_TO:-$ALERT_FROM}"
 # to an attacker-named agent. Same rule as scripts/agent-msg.sh: the values
 # travel in the ENVIRONMENT and json.dumps does the quoting.
 ALERT_TEXT="[PROD-FA ORSEG, post-checkout hook] Fa: $TOPLEVEL -- agat valtott a(z) $BRANCH agra. (Ha ez az utvonal nem a telepites fo faja, ez PROBA, nem eles riasztas.) AUTO-VISSZAALLITAS: $REVERTED. Commitot a pre-commit hook blokkol; szandekos valtashoz MARVEEN_PROD_CHECKOUT_OK=1."
-# THE SECOND HALF OF THIS CONDITION IS UNREACHABLE, ON PURPOSE. ALERT_TO falls
-# back to ALERT_FROM above, so it can only be empty when ALERT_FROM already is,
-# and the first half has caught that. It stays as a backstop against a future
-# edit that changes the fallback -- but nobody should count it as a second
-# gate: the sender check is the one doing the work, and it is the one the test
-# "a recipient from the variable is NOT enough" pins.
+# BOTH HALVES OF THIS CONDITION ARE NOW REACHABLE, and that is a change from
+# the previous revision of this hook, where the second was dead code on purpose
+# (ALERT_TO fell back to ALERT_FROM, so it could only be empty when ALERT_FROM
+# already was). Since the sender may now come from SYSTEM_SENDER_IDS while the
+# recipient still comes only from MAIN_AGENT_ID, an install that registers the
+# guard but has no MAIN_AGENT_ID has a sender and NO recipient. Both cases are
+# pinned by tests; neither is decoration.
 if [ -z "$ALERT_FROM" ] || [ -z "$ALERT_TO" ]; then
   # No recipient, no guess. The person who caused the switch is standing at
   # this terminal, so the alert goes to THEM on stderr rather than to an
   # invented mailbox. Still exit 0: a guard must not break git.
-  echo "[prod-tree-guard] FIGYELEM: nincs feladhato riasztas -- MAIN_AGENT_ID nincs a(z) $PROD_ROOT/.env fajlban (a felado CSAK onnan jon), ezert a riasztas NEM ment el senkinek. $ALERT_TEXT" >&2
+  echo "[prod-tree-guard] FIGYELEM: nincs feladhato riasztas -- MAIN_AGENT_ID nincs a(z) $PROD_ROOT/.env fajlban (a cimzett CSAK onnan vagy a MARVEEN_GUARD_ALERT_TO-bol jon; a felado onnan vagy a SYSTEM_SENDER_IDS-ben felvett guard-nevbol), ezert a riasztas NEM ment el senkinek. $ALERT_TEXT" >&2
   exit 0
 fi
 GUARD_BODY=""
