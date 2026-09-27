@@ -182,7 +182,7 @@ def main_agent_id() -> str:
                 return value
     except OSError:
         pass
-    return "marveen"
+    return "picard"
 
 
 # Resolved once at import: AGENT is not only the message recipient, it is

@@ -95,7 +95,7 @@ def main_agent_id() -> str:
                 return value
     except OSError:
         pass
-    return "marveen"
+    return "picard"
 
 # Proof-of-life artefact: its mtime answers "did the silent path actually run
 # today", which "is the task enabled" does not.
