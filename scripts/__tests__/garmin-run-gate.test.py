@@ -9,7 +9,7 @@ constant that names a file or a URL is rebound here -- state, pending,
 heartbeat, token, messages endpoint, the analysis script itself -- and the
 notify path is replaced outright so no request can leave the process.
 
-Run: python3 scripts/test_garmin_run_gate.py
+Run: python3 scripts/__tests__/garmin-run-gate.test.py
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import tempfile
 from pathlib import Path
 
 SPEC = importlib.util.spec_from_file_location(
-    "garmin_run_gate", Path(__file__).resolve().parent / "garmin_run_gate.py"
+    "garmin_run_gate", Path(__file__).resolve().parent.parent / "garmin_run_gate.py"
 )
 gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
