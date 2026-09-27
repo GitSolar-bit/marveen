@@ -160,31 +160,47 @@ def main_agent_id() -> str:
     it was a name written into this script that had nothing to do with the
     install it runs on. Resolving it the same way the product does is the fix.
 
-    Accepts the shapes a hand-edited .env actually contains: a leading
-    `export `, surrounding quotes, and a trailing ` # comment`.
+    THIS IS A LINE-FOR-LINE MIRROR of src/env.ts `readEnvFile`, and the mirror
+    is the point: an earlier version of this function was DELIBERATELY more
+    tolerant (it stripped a leading `export `, a trailing ` # comment`, and one
+    side's quote), and on five measured shapes it answered something the product
+    never would. The worst of them was `export MAIN_AGENT_ID=x`: the product's
+    key becomes `export MAIN_AGENT_ID`, so the key is absent and the fallback
+    applies -- exactly the "an id that is not this install's" misdirection this
+    change exists to remove. Measured 2026-09-27 against the compiled dist.
+
+    So every rule below is the product's rule, including the ones that look
+    wrong in isolation:
+      - a line is skipped only if blank or starting with `#` (after trim)
+      - the key is everything before the FIRST `=`, trimmed -- so `export K=v`
+        has the key `export K` and never matches
+      - the value is trimmed, and quotes come off ONLY when both ends carry the
+        same one; a trailing comment is part of the value
+      - an EMPTY value stays `""`, because the product's `??` is nullish-only
+      - the LAST matching line wins, because the product overwrites the key
     """
     env = MARVEEN_DIR / ".env"
+    talalt: str | None = None
     try:
         for line in env.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line.startswith("export "):
-                line = line[len("export "):].lstrip()
-            if not line.startswith("MAIN_AGENT_ID="):
+            trimmelt = line.strip()
+            if not trimmelt or trimmelt.startswith("#"):
                 continue
-            value = line.split("=", 1)[1].strip()
-            if value[:1] in ("'", '"'):
-                # quoted: the value ends at the closing quote, so a '#' inside stays
-                zaro = value.find(value[0], 1)
-                if zaro > 0:
-                    return value[1:zaro]
-            value = value.split("#", 1)[0].strip().strip("\"'")
-            if value:
-                return value
+            egyenlo = trimmelt.find("=")
+            if egyenlo == -1:
+                continue
+            kulcs = trimmelt[:egyenlo].strip()
+            ertek = trimmelt[egyenlo + 1:].strip()
+            if (ertek.startswith('"') and ertek.endswith('"')) or (
+                ertek.startswith("'") and ertek.endswith("'")
+            ):
+                ertek = ertek[1:-1]
+            if kulcs != "MAIN_AGENT_ID":
+                continue
+            talalt = ertek
     except OSError:
         pass
-    return "marveen"
-
-
+    return "marveen" if talalt is None else talalt
 # Resolved once at import: AGENT is not only the message recipient, it is
 # also the SQL filter in the activity queries below. A None here does not
 # fail -- it silently matches no rows, so the gate would report "no

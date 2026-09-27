@@ -426,16 +426,34 @@ def scenario_env_shapes() -> None:
     line simply did not match, and the gate fell back to the default while a
     perfectly good id sat in the file.
     """
-    print("the .env reader handles export, quotes and trailing comments")
+    print("the .env reader is a LINE-FOR-LINE mirror of the product (parity)")
     import tempfile, pathlib
     esetek = [
+        # PARITAS-TABLAZAT a termek src/env.ts readEnvFile-javal + a config.ts
+        # `?? 'marveen'` fallbackjaval. Merve 2026-09-27 a LEFORDITOTT dist/env.js
+        # ellen, tizenharom alakon; minden elvart ertek ONNAN jon, nem attol, ami
+        # kenyelmes lenne. Az elozo valtozat itt az ENGEDEKENY alakot pinnelte
+        # helyesnek, es ezzel ot ponton a termektol ELTERO viselkedest rogzitett.
         ("MAIN_AGENT_ID=sima\n", "sima"),
-        ("export MAIN_AGENT_ID=exportalt\n", "exportalt"),
+        # a termek kulcsa `export MAIN_AGENT_ID` lesz, tehat a kulcs HIANYZIK ->
+        # fallback. Ez a legfontosabb sor: epp ez a felreiranyitas, amiert a
+        # BEEGETETT913 keszult.
+        ("export MAIN_AGENT_ID=exportalt\n", "marveen"),
         ('MAIN_AGENT_ID="idezett"\n', "idezett"),
-        ("MAIN_AGENT_ID=kommentes  # ez itt megjegyzes\n", "kommentes"),
-        ('MAIN_AGENT_ID="ra#cs"  # a kettes a kommentben\n', "ra#cs"),
-        ("  export   MAIN_AGENT_ID = 'mind'   \n", None),   # szokoz az = korul: NEM kezeljuk
-        ("BOT_NAME=Valami\n", "marveen"),                   # nincs kulcs -> a termek alapertelmezese
+        # a sorvegi komment az ERTEK RESZE a termeknel
+        ("MAIN_AGENT_ID=kommentes  # ez itt megjegyzes\n", "kommentes  # ez itt megjegyzes"),
+        # idezojel csak akkor jon le, ha MINDKET veg az; itt a veg a komment
+        ('MAIN_AGENT_ID="ra#cs"  # a kettes a kommentben\n', '"ra#cs"  # a kettes a kommentben'),
+        ("  export   MAIN_AGENT_ID = 'mind'   \n", "marveen"),
+        ("BOT_NAME=Valami\n", "marveen"),
+        # URES ertek: a termek `??`-ja NULLISH-only, tehat az ures sztring ATMEGY
+        ("MAIN_AGENT_ID=\n", ""),
+        # a termek minden sort feldolgoz es FELULIRJA a kulcsot: az UTOLSO nyer
+        ("MAIN_AGENT_ID=elso\nMAIN_AGENT_ID=masodik\n", "masodik"),
+        # `#`-kal kezdodo sor kihagyva, tehat a valodi sor ervenyesul
+        ("# MAIN_AGENT_ID=kikommentezve\nMAIN_AGENT_ID=valodi\n", "valodi"),
+        # egyoldalu idezojel NEM jon le
+        ("MAIN_AGENT_ID='egyoldalu\n", "'egyoldalu"),
     ]
     eredeti = gate.MARVEEN_DIR
     with tempfile.TemporaryDirectory() as d:
@@ -444,13 +462,7 @@ def scenario_env_shapes() -> None:
             (gate.MARVEEN_DIR / ".env").write_text(tartalom, encoding="utf-8")
             kapott = gate.main_agent_id()
             cimke = tartalom.strip().replace("\n", " ")[:38]
-            if vart is None:
-                # Kimondva, hogy MIT NEM tud: a `KEY = value` alak (szokoz az
-                # egyenlosegjel korul) nem ervenyes a .env-ben sem, es a
-                # termek olvasoja sem fogadja el. Nem hallgatolagos hianyossag.
-                check_eq(f"nem kezeli (es ez szandekos): {cimke}", kapott, "marveen")
-            else:
-                check_eq(f"{cimke} -> {vart}", kapott, vart)
+            check_eq(f"{cimke} -> {vart!r}", kapott, vart)
     gate.MARVEEN_DIR = eredeti
 
 

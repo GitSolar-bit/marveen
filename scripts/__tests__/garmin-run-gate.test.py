@@ -26,7 +26,7 @@ SPEC = importlib.util.spec_from_file_location(
 gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 
-VALODI_NOTIFY = gate.notify_seven  # captured before any scenario rebinds it
+VALODI_NOTIFY = gate.notify_main_agent  # captured before any scenario rebinds it
 
 FAILURES: list[str] = []
 
@@ -77,7 +77,7 @@ def scenario_nothing_new() -> None:
         wire(tmp, fake_analysis_script(tmp, 0, None))
         gate.STATE_FILE.write_text(json.dumps({"last_activity_id": "111"}))
         called = []
-        gate.notify_seven = lambda a: called.append(a)
+        gate.notify_main_agent = lambda a: called.append(a)
 
         check("exit code", gate.main(), 0)
         check("notified", called, [])
@@ -92,7 +92,7 @@ def scenario_new_run() -> None:
         wire(tmp, fake_analysis_script(tmp, 2, "222"))
         gate.STATE_FILE.write_text(json.dumps({"last_activity_id": "111"}))
         called = []
-        gate.notify_seven = lambda a: called.append(a)
+        gate.notify_main_agent = lambda a: called.append(a)
 
         check("exit code", gate.main(), 0)
         check("notified with new id", called, ["222"])
@@ -109,7 +109,7 @@ def scenario_notify_fails() -> None:
         def boom(_):
             raise OSError("dashboard down")
 
-        gate.notify_seven = boom
+        gate.notify_main_agent = boom
 
         check("exit code", gate.main(), 1)
         check(
@@ -126,7 +126,7 @@ def scenario_crash() -> None:
         wire(tmp, fake_analysis_script(tmp, 1, None))
         gate.STATE_FILE.write_text(json.dumps({"last_activity_id": "111"}))
         called = []
-        gate.notify_seven = lambda a: called.append(a)
+        gate.notify_main_agent = lambda a: called.append(a)
 
         check("exit code", gate.main(), 1)
         check("notified", called, [])
@@ -142,7 +142,7 @@ def scenario_no_state_file() -> None:
         def boom(_):
             raise OSError("dashboard down")
 
-        gate.notify_seven = boom
+        gate.notify_main_agent = boom
 
         check("exit code", gate.main(), 1)
         check("state file gone again", gate.STATE_FILE.exists(), False)
@@ -159,7 +159,7 @@ def scenario_sender_is_the_agent_id() -> None:
     `env['MAIN_AGENT_ID'] ?? 'marveen'`: on an install without the key that IS
     the registered agent, so anything else we invented would be a 403 too.
 
-    Every other scenario replaces notify_seven outright, so this is the only
+    Every other scenario replaces notify_main_agent outright, so this is the only
     one that runs the real function -- which is exactly why the sender went
     unmeasured until review.
     """
@@ -178,12 +178,12 @@ def scenario_sender_is_the_agent_id() -> None:
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
         wire(tmp, fake_analysis_script(tmp, 0, None))
-        gate.notify_seven = VALODI_NOTIFY
+        gate.notify_main_agent = VALODI_NOTIFY
         eredeti_env, eredeti_urlopen = gate.MARVEEN_DIR, gate.urllib.request.urlopen
         gate.MARVEEN_DIR = tmp                      # nincs .env -> a termek alapertelmezese
         gate.urllib.request.urlopen = hamis
         try:
-            gate.notify_seven("333")
+            gate.notify_main_agent("333")
         finally:
             gate.MARVEEN_DIR, gate.urllib.request.urlopen = eredeti_env, eredeti_urlopen
     check("from is the agent id", kuldott.get("from"), "marveen")
@@ -201,15 +201,33 @@ def scenario_env_reader_shapes() -> None:
     are the memoria side's list, kept identical on purpose so the two readers
     cannot drift apart unnoticed.
     """
-    print("the .env reader handles export, quotes and trailing comments")
+    print("the .env reader is a LINE-FOR-LINE mirror of the product (parity)")
     esetek = [
+        # PARITAS-TABLAZAT a termek src/env.ts readEnvFile-javal + a config.ts
+        # `?? 'marveen'` fallbackjaval. Merve 2026-09-27 a LEFORDITOTT dist/env.js
+        # ellen, tizenharom alakon; minden elvart ertek ONNAN jon, nem attol, ami
+        # kenyelmes lenne. Az elozo valtozat itt az ENGEDEKENY alakot pinnelte
+        # helyesnek, es ezzel ot ponton a termektol ELTERO viselkedest rogzitett.
         ("MAIN_AGENT_ID=sima\n", "sima"),
-        ("export MAIN_AGENT_ID=exportalt\n", "exportalt"),
+        # a termek kulcsa `export MAIN_AGENT_ID` lesz, tehat a kulcs HIANYZIK ->
+        # fallback. Ez a legfontosabb sor: epp ez a felreiranyitas, amiert a
+        # BEEGETETT913 keszult.
+        ("export MAIN_AGENT_ID=exportalt\n", "marveen"),
         ('MAIN_AGENT_ID="idezett"\n', "idezett"),
-        ("MAIN_AGENT_ID=kommentes  # ez itt megjegyzes\n", "kommentes"),
-        ('MAIN_AGENT_ID="ra#cs"  # a kettes a kommentben\n', "ra#cs"),
-        ("  export   MAIN_AGENT_ID = 'mind'   \n", None),   # szokoz az = korul: NEM kezeljuk
-        ("BOT_NAME=Valami\n", "marveen"),                   # nincs kulcs -> a termek alapertelmezese
+        # a sorvegi komment az ERTEK RESZE a termeknel
+        ("MAIN_AGENT_ID=kommentes  # ez itt megjegyzes\n", "kommentes  # ez itt megjegyzes"),
+        # idezojel csak akkor jon le, ha MINDKET veg az; itt a veg a komment
+        ('MAIN_AGENT_ID="ra#cs"  # a kettes a kommentben\n', '"ra#cs"  # a kettes a kommentben'),
+        ("  export   MAIN_AGENT_ID = 'mind'   \n", "marveen"),
+        ("BOT_NAME=Valami\n", "marveen"),
+        # URES ertek: a termek `??`-ja NULLISH-only, tehat az ures sztring ATMEGY
+        ("MAIN_AGENT_ID=\n", ""),
+        # a termek minden sort feldolgoz es FELULIRJA a kulcsot: az UTOLSO nyer
+        ("MAIN_AGENT_ID=elso\nMAIN_AGENT_ID=masodik\n", "masodik"),
+        # `#`-kal kezdodo sor kihagyva, tehat a valodi sor ervenyesul
+        ("# MAIN_AGENT_ID=kikommentezve\nMAIN_AGENT_ID=valodi\n", "valodi"),
+        # egyoldalu idezojel NEM jon le
+        ("MAIN_AGENT_ID='egyoldalu\n", "'egyoldalu"),
     ]
     eredeti = gate.MARVEEN_DIR
     try:
@@ -219,13 +237,7 @@ def scenario_env_reader_shapes() -> None:
                 (gate.MARVEEN_DIR / ".env").write_text(tartalom, encoding="utf-8")
                 kapott = gate.main_agent_id()
                 cimke = tartalom.strip().replace("\n", " ")[:38]
-                if vart is None:
-                    # Kimondva, hogy MIT NEM tud: a `KEY = value` alak (szokoz az
-                    # egyenlosegjel korul) a .env-ben sem ervenyes, es a termek
-                    # olvasoja sem fogadja el. Nem hallgatolagos hianyossag.
-                    check(f"nem kezeli (es ez szandekos): {cimke}", kapott, "marveen")
-                else:
-                    check(f"{cimke} -> {vart}", kapott, vart)
+                check(f"{cimke} -> {vart!r}", kapott, vart)
     finally:
         gate.MARVEEN_DIR = eredeti
 
