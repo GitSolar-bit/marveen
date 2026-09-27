@@ -656,8 +656,114 @@ claude_install() {
   fi
 }
 
+# NATIVE-INSTALL HOSTS: never touch npm.
+#
+# A host that moved to Anthropic's native installer runs
+# ~/.local/bin/claude -> ~/.local/share/claude/versions/<v>. The daily check
+# below used to run `npm install -g` unconditionally, which RE-CREATES a
+# second, independent claude under the npm global prefix on a host that had
+# already migrated away from it. Measured 2026-09-17: the daily check
+# reinstalled the npm copy (2.1.274) while the fleet ran native 2.1.265, and
+# the main session then came up on the npm copy -- two versions of claude on
+# one machine, the same second-install vector that broke the install four
+# times in one day in July.
+#
+# Auto-updating the native install from here is ALSO off, on purpose:
+# `claude update` on a native install can misdetect itself as npm-global and
+# reinstall the npm package, re-creating the very second install this block
+# prevents. Upgrading a native build is a deliberate step (`claude install
+# stable`), not a side effect of a boot.
+CLAUDE_NATIVE_ROOT="$HOME/.local/share/claude/versions"
+claude_realpath() {
+  python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null \
+    || readlink -f "$1" 2>/dev/null
+}
+claude_is_native() {
+  local b t root
+  b="$(command -v claude 2>/dev/null)" || return 1
+  [ -n "$b" ] || return 1
+  t="$(claude_realpath "$b")" || return 1
+  # Resolve the root too: HOME itself may sit behind a symlink (macOS /var ->
+  # /private/var), and a resolved target never matches an unresolved prefix.
+  root="$(claude_realpath "$CLAUDE_NATIVE_ROOT")" || return 1
+  [ -n "$t" ] && [ -n "$root" ] || return 1
+  case "$t" in
+    "$root"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Self-heal for a native host whose LAUNCHER broke while the versioned
+# binaries are still on disk: re-link to the newest one instead of falling
+# back to npm, which would reintroduce the second install.
+#
+# A versions dir alone is NOT proof that the host is native today: a host that
+# tried the native installer once and went back to npm keeps a stale
+# versions/<old> behind. Relinking that would pin the host to an old CLI and,
+# because claude_is_native is then true, skip every later update. So relink
+# only on evidence that the host is native NOW:
+#   - the launcher is still there as a symlink into the versions dir, and only
+#     its target is gone (dangling), or
+#   - there is no launcher, AND no npm global package for
+#     @anthropic-ai/claude-code either, so npm is not the install this host was
+#     running. (The package NAME, not $CLAUDE_PKG: that may carry an @<pin>.)
+#     EXCEPT when the npm update stamp is newer than the newest native build:
+#     claude_install writes $CLAUDE_UPDATE_STAMP only after a successful
+#     `npm install -g`, so a newer stamp proves npm was the live install after
+#     that build. That is the documented npm race aftermath ("no package dir AND
+#     no claude binary"), where a missing package is evidence of the crash, not
+#     of a native host (review #1613, round 2).
+#     Trade-off: a native host whose stamp was refreshed by the pre-fix daily
+#     check AND whose launcher is gone entirely (not dangling) falls through to
+#     npm. A dangling launcher still wins, and after this change a native host
+#     no longer refreshes the stamp, so the window only covers hosts hit before.
+# Anything else falls through to the npm self-heal, exactly as before.
+claude_host_is_native_now() {
+  local launcher="$HOME/.local/bin/claude" target root npm_root newest
+  if [ -L "$launcher" ]; then
+    target="$(readlink "$launcher" 2>/dev/null)"
+    # The target may be written with the resolved HOME (/private/var/...) or
+    # the literal one; accept either spelling of the versions root.
+    root="$(claude_realpath "$CLAUDE_NATIVE_ROOT")"
+    case "$target" in
+      "$CLAUDE_NATIVE_ROOT"/*) return 0 ;;
+    esac
+    [ -n "$root" ] && case "$target" in "$root"/*) return 0 ;; esac
+    return 1
+  fi
+  # `-nt` compares whole seconds on macOS bash 3.2; a stamp and a build written
+  # in the same second count as "not newer", which keeps the native reading.
+  newest="$(ls -1 "$CLAUDE_NATIVE_ROOT" 2>/dev/null | sort -V | tail -1)"
+  if [ -e "$CLAUDE_UPDATE_STAMP" ] && [ -n "$newest" ] \
+     && [ "$CLAUDE_UPDATE_STAMP" -nt "$CLAUDE_NATIVE_ROOT/$newest" ]; then
+    return 1
+  fi
+  if command -v npm >/dev/null 2>&1; then
+    npm_root="$(npm root -g 2>/dev/null)"
+    [ -n "$npm_root" ] && [ -d "$npm_root/@anthropic-ai/claude-code" ] && return 1
+  fi
+  return 0
+}
+claude_relink_native() {
+  local newest
+  claude_host_is_native_now || return 1
+  newest="$(ls -1 "$CLAUDE_NATIVE_ROOT" 2>/dev/null | sort -V | tail -1)"
+  [ -n "$newest" ] || return 1
+  [ -x "$CLAUDE_NATIVE_ROOT/$newest" ] || return 1
+  mkdir -p "$HOME/.local/bin" || return 1
+  # macOS: an operator may have locked the symlink with `chflags -h uchg`.
+  command -v chflags >/dev/null 2>&1 && chflags -h nouchg "$HOME/.local/bin/claude" 2>/dev/null
+  ln -sfn "$CLAUDE_NATIVE_ROOT/$newest" "$HOME/.local/bin/claude" || return 1
+  echo "$(date '+%F %T') claude relinked to native $newest" >&2
+  command -v claude >/dev/null 2>&1
+}
+
 if ! command -v claude >/dev/null 2>&1; then
-  claude_install "binary missing -- self-heal"
+  if ! claude_relink_native; then
+    claude_install "binary missing -- self-heal"
+  fi
+elif claude_is_native; then
+  echo "$(date '+%F %T') claude update SKIPPED: native install, npm path disabled" >&2
 elif [ "$AVX_LESS" = "0" ] && [ -z "$(find "$CLAUDE_UPDATE_STAMP" -mtime -1 2>/dev/null)" ]; then
   # AVX-less hosts are excluded on purpose: their claude is pinned, and
   # "keep it current" is exactly what breaks them.
