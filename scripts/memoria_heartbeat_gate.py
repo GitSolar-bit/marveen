@@ -188,7 +188,7 @@ def main_agent_id() -> str:
 # Resolved once at import: AGENT is not only the message recipient, it is
 # also the SQL filter in the activity queries below. A None here does not
 # fail -- it silently matches no rows, so the gate would report "no
-# activity" forever. Caught by scripts/test_memoria_heartbeat_gate.py.
+# activity" forever. Caught by scripts/__tests__/memoria-heartbeat-gate.test.py.
 AGENT = main_agent_id()
 
 # The agent's own `--mark-seen` call is logged by the PostToolUse hook AFTER
