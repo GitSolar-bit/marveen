@@ -7,7 +7,7 @@ call itself. Nothing here may reach store/claudeclaw.db or the live agent.
 The scenario that matters most is `scenario_own_turn_does_not_retrigger`: it is
 the whole reason the watermark is written by the agent instead of by the gate.
 
-Run: python3 scripts/test_memoria_heartbeat_gate.py
+Run: python3 scripts/__tests__/memoria-heartbeat-gate.test.py
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import tempfile
 from pathlib import Path
 
 SPEC = importlib.util.spec_from_file_location(
-    "memoria_heartbeat_gate", Path(__file__).resolve().parent / "memoria_heartbeat_gate.py"
+    "memoria_heartbeat_gate", Path(__file__).resolve().parent.parent / "memoria_heartbeat_gate.py"
 )
 gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
