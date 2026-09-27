@@ -191,6 +191,45 @@ def scenario_sender_is_the_agent_id() -> None:
     check("not a descriptive label", kuldott.get("from") in {"garmin-gate", "geordi"}, False)
 
 
+def scenario_env_reader_shapes() -> None:
+    """The .env reader accepts the shapes a hand-edited file actually contains.
+
+    The reader in this gate already handles `export `, quotes and a trailing
+    comment -- nothing pinned it here. Measured 2026-09-27 by removing the
+    export-prefix branch from both gates: the memoria suite went red, this one
+    stayed GREEN. Same code, same defect, one of them invisible. The cases below
+    are the memoria side's list, kept identical on purpose so the two readers
+    cannot drift apart unnoticed.
+    """
+    print("the .env reader handles export, quotes and trailing comments")
+    esetek = [
+        ("MAIN_AGENT_ID=sima\n", "sima"),
+        ("export MAIN_AGENT_ID=exportalt\n", "exportalt"),
+        ('MAIN_AGENT_ID="idezett"\n', "idezett"),
+        ("MAIN_AGENT_ID=kommentes  # ez itt megjegyzes\n", "kommentes"),
+        ('MAIN_AGENT_ID="ra#cs"  # a kettes a kommentben\n', "ra#cs"),
+        ("  export   MAIN_AGENT_ID = 'mind'   \n", None),   # szokoz az = korul: NEM kezeljuk
+        ("BOT_NAME=Valami\n", "marveen"),                   # nincs kulcs -> a termek alapertelmezese
+    ]
+    eredeti = gate.MARVEEN_DIR
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            gate.MARVEEN_DIR = Path(d)
+            for tartalom, vart in esetek:
+                (gate.MARVEEN_DIR / ".env").write_text(tartalom, encoding="utf-8")
+                kapott = gate.main_agent_id()
+                cimke = tartalom.strip().replace("\n", " ")[:38]
+                if vart is None:
+                    # Kimondva, hogy MIT NEM tud: a `KEY = value` alak (szokoz az
+                    # egyenlosegjel korul) a .env-ben sem ervenyes, es a termek
+                    # olvasoja sem fogadja el. Nem hallgatolagos hianyossag.
+                    check(f"nem kezeli (es ez szandekos): {cimke}", kapott, "marveen")
+                else:
+                    check(f"{cimke} -> {vart}", kapott, vart)
+    finally:
+        gate.MARVEEN_DIR = eredeti
+
+
 if __name__ == "__main__":
     for scenario in (
         scenario_nothing_new,
@@ -199,6 +238,7 @@ if __name__ == "__main__":
         scenario_crash,
         scenario_no_state_file,
         scenario_sender_is_the_agent_id,
+        scenario_env_reader_shapes,
     ):
         scenario()
         print()
