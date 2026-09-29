@@ -1159,8 +1159,10 @@ STATE_DIR_ENV="export ${STATE_ENV_VAR}='${MAIN_CHAN_DIR}' && "
 # lost. When the dashboard's worker session then created the server, our
 # new-session inherited its token-less global env: the channels claude came up
 # "Not logged in", --channels ignored, Telegram dead, silently. Two layers now:
-#   1. the token rides on OUR new-session itself (`-e`, tmux >= 3.2), so this
-#      session has it whoever created the server;
+#   1. OUR pane sources the token from a 0600 file before anything else runs
+#      (TOKENARGV929; it used to ride on new-session `-e`, which left it in the
+#      tmux server's command line), so this session has it whoever created
+#      the server;
 #   2. the globals are set again right AFTER new-session, when a server
 #      certainly exists, so a later pane relaunch (auto-restart runner) and
 #      every sub-agent session inherit them too.
@@ -1185,14 +1187,45 @@ _tmux_set_auth_globals() {
 $TMUX start-server 2>/dev/null || true
 _tmux_set_auth_globals
 
-# new-session -e needs tmux >= 3.2; older tmux keeps the global-env path only.
-TMUX_AUTH_ENV=()
-_tmux_ver="$($TMUX -V 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)"
-if [ -n "$_tmux_ver" ] && awk -v v="$_tmux_ver" 'BEGIN { split(v, p, "."); exit !((p[1] > 3) || (p[1] == 3 && p[2] >= 2)) }'; then
-  [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && TMUX_AUTH_ENV+=(-e "CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN")
-  [ -n "${ANTHROPIC_API_KEY:-}" ] && TMUX_AUTH_ENV+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+# Layer 1 of CHANNELSAUTHRACE923, WITHOUT the secret in any argv (TOKENARGV929).
+# It used to be `new-session -e CLAUDE_CODE_OAUTH_TOKEN=<value>`: when that
+# new-session is what creates the tmux server (after a reboot it usually is),
+# the server process KEEPS that command line for its whole life, so the fleet
+# token sat in plain `ps -axo command` output for every local process to read
+# (measured 2026-09-29 on the main host). Now the values go into a 0600 file
+# and the pane's own shell sources it before anything else runs, the same
+# "evaluated in the launched shell, never in argv" rule as the $(cat) in
+# CFG_ENV above. CFG_ENV still comes AFTER it in the pane command, so a mode
+# that exports its own token keeps overriding this one, as it did with -e.
+# The file is rewritten on every launch; store/ is gitignored.
+AUTH_PANE_ENV=""
+_auth_file="$INSTALL_DIR/store/.channels-pane-auth"
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  _q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+  # Written to a NEW file (mktemp: 0600, O_EXCL, never follows a symlink) and
+  # renamed over the final name, so the value never lands in a pre-existing
+  # wider-mode file or through a symlink planted at that path (Geri, #1647
+  # review: `umask 077; : >` only applies to a file it CREATES, and `>` follows
+  # a symlink). mv replaces the name itself, not a symlink's target.
+  _auth_tmp="$(mktemp "$_auth_file.XXXXXX")" || _auth_tmp=""
+  if [ -n "$_auth_tmp" ]; then
+    {
+      [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && printf 'export CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$(_q "$CLAUDE_CODE_OAUTH_TOKEN")"
+      [ -n "${ANTHROPIC_API_KEY:-}" ] && printf 'export ANTHROPIC_API_KEY=%s\n' "$(_q "$ANTHROPIC_API_KEY")"
+      true
+    } > "$_auth_tmp"
+    if mv -f "$_auth_tmp" "$_auth_file"; then
+      AUTH_PANE_ENV=". '$_auth_file' && "
+    else
+      rm -f "$_auth_tmp" 2>/dev/null || true
+    fi
+  fi
+  unset -f _q
+  unset _auth_tmp
+else
+  rm -f "$_auth_file" 2>/dev/null || true
 fi
-unset _tmux_ver
+unset _auth_file
 
 # Owner commands (ELSOKOR922 spec D-4): the Telegram plugin answers /status
 # and /help itself, so those two never reach the session's command hook. Take
@@ -1243,8 +1276,8 @@ $TMUX kill-session -t "$SESSION" 2>/dev/null || true
 # the server's global environment, so every sub-agent session inherited the
 # MAIN session's channel state dir. The -g -u after the launch cleans a server
 # polluted earlier.
-env -u "$STATE_ENV_VAR" $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" ${TMUX_AUTH_ENV[@]+"${TMUX_AUTH_ENV[@]}"} \
-  "${STATE_DIR_ENV}${MCP_BATCH_ENV}${CFG_ENV}${CUSTOM_PROVIDER_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
+env -u "$STATE_ENV_VAR" $TMUX new-session -d -s "$SESSION" -c "$INSTALL_DIR" \
+  "${AUTH_PANE_ENV}${STATE_DIR_ENV}${MCP_BATCH_ENV}${CFG_ENV}${CUSTOM_PROVIDER_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
 # The server certainly exists now: see CHANNELSAUTHRACE923 above.
 _tmux_set_auth_globals
 # remain-on-exit: without this, if the pane's claude process dies for ANY
@@ -1335,8 +1368,8 @@ for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
         # invasive change (a stable fallback dir + a seeded ~/.claude.json project
         # entry); see the PR description / card 7EB18437.
         [ -e "$INSTALL_DIR/CLAUDE.md" ] && ln -sf "$INSTALL_DIR/CLAUDE.md" "$_CHANNELS_STARTDIR/CLAUDE.md" 2>/dev/null || true
-        env -u "$STATE_ENV_VAR" $TMUX new-session -d -s "$SESSION" -c "$_CHANNELS_STARTDIR" ${TMUX_AUTH_ENV[@]+"${TMUX_AUTH_ENV[@]}"} \
-          "${STATE_DIR_ENV}${MCP_BATCH_ENV}${CFG_ENV}${CUSTOM_PROVIDER_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
+        env -u "$STATE_ENV_VAR" $TMUX new-session -d -s "$SESSION" -c "$_CHANNELS_STARTDIR" \
+          "${AUTH_PANE_ENV}${STATE_DIR_ENV}${MCP_BATCH_ENV}${CFG_ENV}${CUSTOM_PROVIDER_ENV}$CLAUDE --dangerously-skip-permissions ${MODEL_FLAG}--channels plugin:${PLUGIN_ID}${EXTRA_CHANNELS}"
         # See the primary new-session above: remain-on-exit keeps the pane
         # (and session) alive if claude dies early, so the scheduled relaunch
         # can always find it. This is the /tmp-fallback launch path, same fix.
