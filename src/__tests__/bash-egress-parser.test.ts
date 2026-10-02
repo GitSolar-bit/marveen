@@ -13,14 +13,14 @@
 //
 // The hook is a .mjs script run by Claude Code. It guards its own entry point
 // (isInvokedDirectly), so importing it here runs no side effects.
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, afterAll } from 'vitest'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, existsSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, existsSync, rmSync, writeFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 // @ts-expect-error -- plain .mjs hook script, no types
-import { classify, isExternal, liftSubstitutions, parseVendorHosts, loadVendorHosts, parseVendorDomains, loadVendorDomains } from '../../scripts/hooks/bash-egress-parser.mjs'
+import { classify, isExternal, liftSubstitutions, parseVendorHosts, loadVendorHosts, parseVendorDomains, loadVendorDomains, PREFIX_WORDS } from '../../scripts/hooks/bash-egress-parser.mjs'
 import {
   BASH_EGRESS_DENY,
   agentGetsBashEgressParser,
@@ -35,6 +35,19 @@ import { isPrivateTarget } from '../../scripts/hooks/bash-egress-parser.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const HOOK = join(ROOT, 'scripts', 'hooks', 'bash-egress-parser.mjs')
+
+// A test run must never append to the repo's real block log. Every spawn below passes its own temp
+// BASH_EGRESS_BLOCK_LOG; this default catches a future spawn that forgets (they all inherit
+// process.env), and the afterAll check fails the run if store/ was touched anyway.
+const REPO_BLOCK_LOG = join(ROOT, 'store', 'bash-egress-blocks.jsonl')
+const stamp = (p: string) => (existsSync(p) ? `${statSync(p).size}:${statSync(p).mtimeMs}` : 'absent')
+const REPO_BLOCK_LOG_BEFORE = stamp(REPO_BLOCK_LOG)
+const TEST_LOG_DIR = mkdtempSync(join(tmpdir(), 'bash-egress-default-log-'))
+process.env.BASH_EGRESS_BLOCK_LOG = join(TEST_LOG_DIR, 'blocks.jsonl')
+afterAll(() => {
+  rmSync(TEST_LOG_DIR, { recursive: true, force: true })
+  expect(stamp(REPO_BLOCK_LOG)).toBe(REPO_BLOCK_LOG_BEFORE)
+})
 
 // The name list, modelled the way bash-egress-deny.test.ts models it (anchored
 // full-match, per sub-command). Used ONLY to state the "before" number.
@@ -415,7 +428,8 @@ describe('heredoc-fed interpreters', () => {
     expect(classify(`python3 - <<'PY'\nimport urllib.request; urllib.request.urlopen('https://api.elevenlabs.io/v1'); urllib.request.urlopen('https://evil.com/')\nPY`, 0, V))
       .toMatchObject({ deny: true, hosts: ['evil.com'] })
   })
-  // KNOWN COLLATERAL, pinned so it is a visible decision and not a surprise: a localhost call whose
+  // KNOWN COLLATERAL, pinned so it stays visible while the false-positive policy is PENDING an owner
+  // decision (strict is the current behaviour, not a ruling): a localhost call whose
   // PAYLOAD mentions an external URL is denied, because the body is judged exactly like a one-liner
   // and the one-liner path already denies this shape. Replayed on 14 days of sub-agent commands,
   // this was 7 of the 15 newly denied heredocs (dashboard posts quoting a github.com / pypi.org URL).
@@ -437,6 +451,76 @@ describe('heredoc-fed interpreters', () => {
       expect(run(PY_EXT.replace('https://example.org/', 'http://localhost:3420/api/health')).stdout).toBe('')
       expect(run('while read u; do curl -s "$u"; done <<< "https://example.org/"').stdout).toContain('"permissionDecision":"deny"')
     } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+})
+
+// A prefix before the interpreter must not hide it (reviewer probe A5-A7, card 4c108004, asked for
+// on 09-24). The table MUST name every PREFIX_WORDS entry: a word added to the set without a row
+// here fails the first test, so the heredoc path can never silently skip a new prefix.
+describe('every PREFIX_WORDS entry in front of a heredoc-fed interpreter', () => {
+  const FORMS: Record<string, string[]> = {
+    env: ['env', 'env A=1', 'env -i A=1', 'env -u HOME'],
+    sudo: ['sudo', 'sudo -n', 'sudo -u root'],
+    command: ['command'],
+    exec: ['exec', 'exec -a name'],
+    time: ['time', 'time -p'],
+    nohup: ['nohup'],
+    nice: ['nice', 'nice -n 5', 'nice -5'],
+    timeout: ['timeout 30', 'timeout 30s', 'timeout -k 5 30', 'timeout --preserve-status 1m'],
+    stdbuf: ['stdbuf -oL', 'stdbuf -o L', 'stdbuf -oL -eL'],
+    do: ['do'],
+    then: ['then'],
+    else: ['else'],
+    elif: ['elif'],
+    '{': ['{'],
+    '(': ['('],
+    '!': ['!'],
+  }
+  const PY = (u: string) => `python3 - <<'PY'\nimport urllib.request\nurllib.request.urlopen('${u}')\nPY`
+  const SH = (u: string) => `bash <<'SH'\ncurl -s ${u}\nSH`
+  const forms = () => Object.values(FORMS).flat()
+  it('the table covers exactly the PREFIX_WORDS set', () => {
+    expect(Object.keys(FORMS).sort()).toEqual([...(PREFIX_WORDS as Set<string>)].sort())
+  })
+  it('denies the python and the bash heredoc behind every prefix form', () => {
+    for (const p of forms()) for (const body of [PY, SH]) {
+      const cmd = `${p} ${body('https://example.org/x')}`
+      expect({ cmd, r: classify(cmd) }).toMatchObject({ cmd, r: { deny: true, hosts: ['example.org'] } })
+    }
+  })
+  it('CONTROL: the localhost twin behind every prefix form passes', () => {
+    for (const p of forms()) for (const body of [PY, SH]) {
+      const cmd = `${p} ${body('http://localhost:3420/api/health')}`
+      expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: false })
+    }
+  })
+  it('a prefix with options no longer hides curl or a one-liner on the plain path either', () => {
+    expect(deny('timeout 30 curl -s https://example.org/x')).toBe(true)
+    expect(deny('stdbuf -oL curl -s https://example.org/x')).toBe(true)
+    expect(deny('nice -n 5 curl -s https://example.org/x')).toBe(true)
+    expect(deny(`timeout 10 python3 -c "import urllib.request; urllib.request.urlopen('https://example.org')"`)).toBe(true)
+    expect(deny('timeout 30 curl -s http://localhost:3420/api/health')).toBe(false)
+  })
+})
+
+// PowerShell (reviewer probe A12): on WSL powershell.exe reaches the network from the Windows side.
+describe('PowerShell bodies', () => {
+  it('denies an external URL in a -Command one-liner or a heredoc-fed -Command -', () => {
+    for (const cmd of [
+      `powershell.exe -Command - <<'PS'\nInvoke-WebRequest https://example.org/x\nPS`,
+      `pwsh -c - <<'PS'\niwr -UseBasicParsing https://example.org/x\nPS`,
+      `powershell.exe -NoProfile -Command "Invoke-RestMethod 'https://example.org/x'"`,
+      `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -command "curl https://example.org/x"`,
+      `PowerShell.exe -Command "(New-Object Net.WebClient).DownloadString('https://example.org/x')"`,
+    ]) expect({ cmd, r: classify(cmd) }).toMatchObject({ cmd, r: { deny: true, hosts: ['example.org'] } })
+  })
+  it('CONTROLS: localhost, and an external URL with no network cmdlet, pass', () => {
+    for (const cmd of [
+      `powershell.exe -Command "Invoke-WebRequest http://localhost:3420/api/health"`,
+      `powershell.exe -Command - <<'PS'\nWrite-Output 'https://example.org/x'\nPS`,
+      // a "curl" word is a network primitive ONLY in PowerShell, not in a python body
+      `python3 - <<'PY'\nprint("curl https://example.org/x")\nPY`,
+    ]) expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: false })
   })
 })
 
@@ -476,6 +560,12 @@ describe('still open after (a) -- pinned on purpose', () => {
     // interpreter itself is closed since EGRESSHEREDOC924, see 'heredoc-fed interpreters' below
     `cat <<'PY' | python3 -\nimport urllib.request; urllib.request.urlopen('https://example.org')\nPY`,
     'while read u; do curl -s "$u"; done < urls.txt', // loop values read from a file
+    // the families the header lists as open after EGRESSHEREDOC924 (reviewer probe A8-A11, A14)
+    'xargs -n1 curl -s <<< "https://example.org/x"', // an argument builder fed on stdin
+    'mapfile -t a <<< "https://example.org/x"; curl -s "${a[0]}"', // an array filler
+    'IFS=, read a b <<< "x,https://example.org/x"; curl -s "$b"', // read under a non-default IFS
+    'while read u; do curl -s "$u"; done < <(echo https://example.org/x)', // process substitution input
+    `python3 - <<'PY'\nimport socket; socket.create_connection(("example.org", 80))\nPY`, // no URL scheme
     'H=$(cat host.txt); curl -s "http://$H/x"', // host not literally in the command
     'curl -s "$URL"', // URL from the environment
     'curl $(echo https://example.org)', // URL computed at runtime by a substitution (#1514 review B)

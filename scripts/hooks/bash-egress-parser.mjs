@@ -9,15 +9,20 @@
 // the command:
 //   1. curl to an EXTERNAL destination: a scheme-bearing URL (http:// included, which the deny list
 //      cannot cover), and any positional / --url / proxy argument even WITHOUT a scheme;
-//   2. an interpreter one-liner (python/node/perl/ruby/php/deno/bun with -c/-e/-r/--eval) whose code
-//      carries an EXTERNAL URL;
+//   2. an interpreter one-liner (python/node/perl/ruby/php/deno/bun with -c/-e/-r/--eval, PowerShell
+//      with -Command) whose code uses a network primitive and carries an EXTERNAL URL;
 //   3. either of the above when the URL sits in a variable ASSIGNED IN THE SAME COMMAND. A `for`
 //      loop word list and the stdin of a `while read` loop (here-string or heredoc) count as such
-//      assignments: `for u in URL; do curl "$u"` and `while read u; do curl "$u"; done <<< URL`;
-//   4. (EGRESSHEREDOC924, owner GO 2026-10-02) a heredoc / here-string that IS an interpreter's
-//      program (`python3 - <<'PY'`, `node <<EOF`, `perl <<-X`, `python3 <<< "..."`): its body is
-//      judged exactly like a -c / -e body (2.). For a shell (bash/sh/zsh/dash/ksh) the body gets the
-//      whole analysis, as if it were the command itself (`bash <<EOF` with a curl inside).
+//      assignments, split on whitespace the way a default `read` splits a line;
+//   4. (EGRESSHEREDOC924, kanban 4c108004) a heredoc / here-string that IS an interpreter's program
+//      (`python3 - <<'PY'`, `node <<EOF`, `powershell.exe -Command - <<'PS'`): its body is judged
+//      exactly like a one-liner body (2.). For a shell (bash/sh/zsh/dash/ksh) the body gets the whole
+//      analysis, as if it were the command itself.
+// The command word is found past assignments, shell keywords and the PREFIX_WORDS commands with
+// their own options (timeout, stdbuf, nice, nohup, env, sudo, command, exec, time), on every path.
+// FALSE-POSITIVE POLICY, pending an owner decision: a body that uses a network primitive is denied
+// for ANY external URL in it, even when the call goes to localhost and the URL is only payload or a
+// comment. That is the one-liner rule, applied unchanged to heredoc bodies.
 // localhost / 127.0.0.1 / [::1] ALWAYS pass: the dashboard's own calls (memory, kanban, message
 // queue, approvals) go over http://localhost and a gate that cut them would silence the fleet.
 // Hosts are cut with a regex, not URL(), so http://localhost:$PORT stays local, while
@@ -41,14 +46,24 @@
 // `curl --data-binary @- <<'JSON'`) it stays inert text.
 //
 // WHAT THIS DOES NOT CLOSE -- said here so nobody reads "merged" as "closed" (owner/Marveen 29047):
-// the name-and-shape list will never be complete. Still open after (a): network calls INSIDE a script
-// file (`bash x.sh`, `python3 x.py` -- the hook sees only the outer command); a program PIPED into
-// an interpreter (`cat <<EOF | python3 -`, `echo "..." | bash`: only a heredoc / here-string on the
-// interpreter itself is read); a URL whose host is not literally in the command (read from a file,
-// `while read u; ... done < urls.txt`, the environment, a previous command, a curl -K config, or
-// computed by a substitution such as `curl $(echo https://x)`); every other network-capable binary
-// (git, pip, npm, ssh, scp, rsync, dig ...). An interpreter body that reaches the network without a
-// NET_PRIMITIVE name (subprocess + curl, a browser driver) passes here exactly as in a one-liner.
+// the name-and-shape list will never be complete. Still open, by family:
+//   - network calls INSIDE a script file: the hook sees only the outer command line;
+//   - a program that reaches an interpreter through a PIPE or a file rather than through a heredoc /
+//     here-string attached to the interpreter itself;
+//   - a destination that a DIFFERENT command reads from stdin and turns into arguments (argument
+//     builders such as xargs or parallel);
+//   - values bound by builtins other than `for` and a plain `read`: array fillers (mapfile /
+//     readarray), `read -a` elements beyond the first, and `read` under a non-default IFS (only
+//     whitespace splitting is modelled);
+//   - loop or command input that comes from a file, a process substitution or a pipe, not from a
+//     literal here-string / heredoc in the command;
+//   - a URL whose host is not literally in the command (the environment, a previous command, a curl
+//     config file, or a value computed at runtime by a command substitution);
+//   - a network primitive given a bare host and port with no URL scheme (socket-level connects): the
+//     body scan finds destinations by URL scheme only;
+//   - an interpreter body that reaches the network without a recognised primitive name (a subprocess
+//     running a downloader, a browser driver, encoded or obfuscated code such as -EncodedCommand);
+//   - every other network-capable binary (git, pip, npm, ssh, scp, rsync, dig, wget ...).
 // Closing those is direction (b): an allowlist / network-level gate, not this hook.
 //
 // Fail-open on unparseable input or an internal error (logged): a crashed gate must not silence the
@@ -102,13 +117,64 @@ const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
 // binding (PHP curl_exec, pycurl) or a stream wrapper (PHP ftps://, Perl LWP gopher://), so an
 // http/ftp-only list let `php -r '...curl_init("sftp://host/")...curl_exec(...)'` out untouched.
 const URL_RE = /\b(?:https?|ftps?|sftp|scp|tftp|smbs?|dict|gophers?|imaps?|pop3s?|smtps?|ldaps?|telnet|mqtt|rtsp):\/\/[^\s'"`<>\\)]+/gi
-const INTERPRETER = /^(?:python(?:\d+(?:\.\d+)?)?|node(?:js)?|perl|ruby|php|deno|bun)$/
+const INTERPRETER = /^(?:python(?:\d+(?:\.\d+)?)?|node(?:js)?|perl|ruby|php|deno|bun|powershell(?:\.exe)?|pwsh(?:\.exe)?)$/
 const CODE_FLAG = new Set(['-c', '-e', '-E', '-r', '--eval', '-p', '--print', 'eval'])
+// PowerShell (WSL reaches the Windows side with powershell.exe): its code flag is -Command (any
+// case, any unambiguous prefix down to -c), and its network primitives are cmdlets and aliases that
+// NET_PRIMITIVE does not name. `curl` / `wget` are listed here ONLY: in PowerShell they are aliases
+// of Invoke-WebRequest, while in a Python body a "curl" word is a subprocess carrying data.
+const POWERSHELL = /^(?:powershell|pwsh)(?:\.exe)?$/i
+const PS_CODE_FLAG = /^-c(?:o(?:m(?:m(?:a(?:n(?:d)?)?)?)?)?)?$/i
+const PS_NET_PRIMITIVE = /\b(?:Invoke-WebRequest|Invoke-RestMethod|iwr|irm|curl|wget|Start-BitsTransfer|Net\.WebClient|DownloadString|DownloadFile|Net\.Http\.HttpClient|Net\.Sockets)\b/i
+function hasCodeFlag(cmd, args) {
+  return args.some((w) => CODE_FLAG.has(w) || (POWERSHELL.test(cmd) && PS_CODE_FLAG.test(w)))
+}
+function usesNetwork(cmd, text) {
+  return NET_PRIMITIVE.test(text) || (POWERSHELL.test(cmd) && PS_NET_PRIMITIVE.test(text))
+}
 // Words that can stand before the real command word of a sub-command. The shell keywords are here
 // because `for p in a b; do curl ...` splits at `;` into a span that starts with `do`, and without
 // them a curl inside a loop or an if/then body was never looked at.
-const PREFIX_WORDS = new Set(['env', 'sudo', 'command', 'exec', 'time', 'nohup', 'nice',
-  'do', 'then', 'else', 'elif', '{', '(', '!'])
+export const PREFIX_WORDS = new Set(['env', 'sudo', 'command', 'exec', 'time', 'nohup', 'nice',
+  'timeout', 'stdbuf', 'do', 'then', 'else', 'elif', '{', '(', '!'])
+// A prefix COMMAND (not a keyword) may carry its own options before the real command word:
+// `timeout -k 5 30 cmd`, `stdbuf -oL cmd`, `nice -n 5 cmd`, `env -u X A=1 cmd`, `sudo -u u cmd`.
+// Every word starting with `-` is skipped; the options listed here also consume the next word.
+// `timeout` additionally takes one positional DURATION. A missing entry here errs toward reading an
+// option VALUE as the command word, which only hides a command; the per-prefix test catches that.
+const PREFIX_OPT_VALUE = {
+  env: new Set(['-u', '--unset', '-C', '--chdir', '-S', '--split-string']),
+  sudo: new Set(['-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt', '-C', '--close-from',
+    '-D', '--chdir', '-r', '--role', '-t', '--type', '-U', '--other-user', '-T', '--command-timeout']),
+  exec: new Set(['-a']),
+  nice: new Set(['-n', '--adjustment']),
+  timeout: new Set(['-s', '--signal', '-k', '--kill-after']),
+  stdbuf: new Set(['-o', '--output', '-e', '--error', '-i', '--input']),
+}
+const PREFIX_COMMANDS = new Set(['env', 'sudo', 'command', 'exec', 'time', 'nohup', 'nice', 'timeout', 'stdbuf'])
+const PREFIX_POSITIONALS = { timeout: 1 }
+// Index of the real command word in `mw` (a sub-command's words): assignments, prefix words and
+// the prefix commands' own options and arguments are skipped.
+export function commandIndex(mw) {
+  let i = 0
+  while (i < mw.length) {
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(mw[i])) { i++; continue }
+    const p = mw[i].split('/').pop()
+    if (!PREFIX_WORDS.has(p)) break
+    i++
+    if (!PREFIX_COMMANDS.has(p)) continue
+    const withValue = PREFIX_OPT_VALUE[p] ?? new Set()
+    let positional = PREFIX_POSITIONALS[p] ?? 0
+    while (i < mw.length) {
+      const a = mw[i]
+      if (a === '--') { i++; break }
+      if (a.startsWith('-') && a.length > 1) { i += withValue.has(a) ? 2 : 1; continue }
+      if (positional > 0 && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(a)) { positional--; i++; continue }
+      break
+    }
+  }
+  return i
+}
 // A one-liner is a DOWNLOADER only when its code uses a network primitive of the language itself.
 // Measured on 7 days of fleet commands: a one-liner that merely CARRIES a URL as data (an
 // inter-agent message built with subprocess + curl to localhost) must not be denied -- that was 4 of
@@ -458,8 +524,7 @@ function commandWordAt(masked, at) {
   for (const [a, b] of spans(masked)) {
     if (at < a || at > b) continue
     const mw = words(masked.slice(a, b))
-    let i = 0
-    while (i < mw.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(mw[i]) || PREFIX_WORDS.has(mw[i]))) i++
+    const i = commandIndex(mw)
     return i < mw.length ? mw[i].split('/').pop() : null
   }
   return null
@@ -470,8 +535,8 @@ function collectReads(orig, masked) {
   const reads = []
   for (const [a, b] of spans(masked)) {
     const sw = shellWords(orig.slice(a, b))
-    let k = 0
-    while (k < sw.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(sw[k]) || PREFIX_WORDS.has(sw[k]) || sw[k] === 'while' || sw[k] === 'until')) k++
+    let k = commandIndex(sw)
+    if (sw[k] === 'while' || sw[k] === 'until') k += 1 + commandIndex(sw.slice(k + 1))
     if (sw[k] !== 'read') continue
     const names = []; let array = null
     for (k++; k < sw.length; k++) {
@@ -529,7 +594,7 @@ export function classify(command, depth = 0, vendorHosts = new Set(), vendorDoma
   for (const f of feeds) {
     const cmd = commandWordAt(masked, f.at)
     const shell = cmd !== null && SHELL.test(cmd)
-    if (!shell && !(cmd !== null && INTERPRETER.test(cmd))) continue
+    if (!shell && !(cmd !== null && INTERPRETER.test(cmd.toLowerCase()))) continue
     const plain = f.expands ? expand(f.text, env) : f.text
     const variants = f.expands ? loopVariants(f.text, env, loops) : []
     for (const text of [plain, ...(variants ?? [])]) {
@@ -539,7 +604,7 @@ export function classify(command, depth = 0, vendorHosts = new Set(), vendorDoma
         if (r.deny) return { ...r, reason: `heredoc-${r.reason}` }
         continue
       }
-      if (!NET_PRIMITIVE.test(text)) continue
+      if (!usesNetwork(cmd, text)) continue
       const found = [...text.matchAll(URL_RE)].map((m) => m[0]).filter(isExternal).map(hostOf)
       const hosts = [...new Set(found)].filter((h) => !vendorHosts.has(h) && !hostInDomains(h, vendorDomains))
       if (hosts.length) return { deny: true, reason: 'heredoc-external', hosts }
@@ -548,8 +613,7 @@ export function classify(command, depth = 0, vendorHosts = new Set(), vendorDoma
   }
   for (const [a, b] of spans(masked)) {
     const mw = words(masked.slice(a, b))
-    let i = 0
-    while (i < mw.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(mw[i]) || PREFIX_WORDS.has(mw[i]))) i++
+    const i = commandIndex(mw)
     if (i >= mw.length) continue
     // Every loop reading AND the plain one: a loop variable can share its name with an assignment
     // elsewhere in the command (`for u in <local>; do ...; done; u=<external>; curl "$u"`), and a
@@ -560,7 +624,7 @@ export function classify(command, depth = 0, vendorHosts = new Set(), vendorDoma
       const cmd = mw[i].split('/').pop()
       let target = null
       if (cmd === 'curl') target = 'curl'
-      else if (INTERPRETER.test(cmd) && mw.slice(i + 1).some((w) => CODE_FLAG.has(w)) && NET_PRIMITIVE.test(text)) target = 'one-liner'
+      else if (INTERPRETER.test(cmd.toLowerCase()) && hasCodeFlag(cmd, mw.slice(i + 1)) && usesNetwork(cmd, text)) target = 'one-liner'
       if (!target) continue
       // curl: the destination is read from the ARGV only. A URL inside a flag VALUE (-d, -e, -H, a
       // JSON payload) is data sent to wherever curl connects, not a destination. The fleet reports PR
