@@ -38,7 +38,6 @@ import json
 import os
 import sys
 import time
-import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # A fo agens ket persona-fajlja, ROOT-hoz kepesti uttal.
@@ -256,6 +255,9 @@ def main():
         f"beszeltuk meg, kerdezz ra."
     )
     try:
+        # Imported here, not at module level: this hook runs after EVERY tool call, almost always
+        # without sending anything, and `import urllib.request` is most of its start-up time.
+        import urllib.request
         req = urllib.request.Request(
             f"https://api.telegram.org/bot{tok}/sendMessage",
             data=json.dumps({"chat_id": chat, "text": text}).encode(),
