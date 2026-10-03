@@ -454,6 +454,44 @@ export function initDatabase(dbPathOverride?: string): void {
     END
   `)
 
+  // Memory version history (card 27ab6a18, 2026-09-14).
+  //
+  // WHY: PUT /api/memories/<id> overwrote `content` in place and answered
+  // 200 {"ok":true}. On 2026-09-14 leanscout destroyed a 1900+ character cold
+  // memory with {"content":"probe"} while only trying to find out whether the
+  // endpoint EXISTED, and a DELETE the same morning took id=159 with it -- in
+  // both cases the previous text was gone with nothing to restore from.
+  //
+  // This table is the poka-yoke leanscout asked for in preference to a gate: a
+  // gate asks the agent not to make a mistake, a saved version removes the
+  // CONSEQUENCE of making one. Every destructive write (PUT overwrite, DELETE)
+  // writes the pre-image here FIRST, so the operation stays reversible and the
+  // API can stay frictionless for the common case -- the repair loop, which is
+  // measurably the normal use of this endpoint (7 of 8 logged calls).
+  //
+  // Nothing in the app UPDATES a row here, and exactly one path deletes: a
+  // plain DELETE of the memory purges that memory's versions with it (PR #1357
+  // fleet review, 2026-09-25). A secret saved by mistake and still readable
+  // through /versions after the delete would be a security issue, not a
+  // product choice. An overwrite (PUT/PATCH) keeps its pre-image as before.
+  // The 'delete' operation value stays legal in the CHECK only so rows written
+  // before the purge existed still satisfy it; new code never writes it.
+  // The pre-image keeps the row's OWN agent_id/category, not the caller's,
+  // because that is what a restore has to put back.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS memory_versions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      memory_id INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      agent_id TEXT,
+      category TEXT,
+      keywords TEXT,
+      operation TEXT NOT NULL CHECK(operation IN ('update','delete')),
+      superseded_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_memory_versions_mid ON memory_versions(memory_id, superseded_at)`)
+
   // Daily logs table
   db.exec(`
     CREATE TABLE IF NOT EXISTS daily_logs (
@@ -1929,6 +1967,71 @@ export function getMemoryStats(): { total: number; byAgent: Record<string, numbe
   return { total, byAgent, byTier, withEmbedding }
 }
 
+/** One stored memory row, as the destructive-write paths need to see it. */
+export interface MemoryRow {
+  id: number
+  agent_id: string | null
+  category: string | null
+  keywords: string | null
+  content: string
+}
+
+/**
+ * Read one memory row by id, or undefined. The PUT/DELETE routes call this
+ * BEFORE writing: the guard needs the old length, the owner and the tier, and
+ * an error message that names them is what makes the agent's next step
+ * checkable instead of guessed (card 27ab6a18).
+ */
+export function getMemoryById(id: number): MemoryRow | undefined {
+  return db.prepare('SELECT id, agent_id, category, keywords, content FROM memories WHERE id = ?').get(id) as MemoryRow | undefined
+}
+
+/**
+ * Copy a row's CURRENT state into memory_versions. Called inside the same
+ * transaction as the destructive write, never on its own -- a pre-image written
+ * outside the transaction can survive a write that then fails, and a restore
+ * would put back something that was never superseded.
+ */
+function snapshotMemoryVersion(row: MemoryRow, operation: 'update', now: number): void {
+  db.prepare(
+    'INSERT INTO memory_versions (memory_id, content, agent_id, category, keywords, operation, superseded_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).run(row.id, row.content, row.agent_id, row.category, row.keywords, operation, now)
+}
+
+/** Pre-images for one memory, newest first. Empty when nothing overwrote it. */
+export function getMemoryVersions(memoryId: number, limit: number = 20): Array<MemoryRow & { operation: string; superseded_at: number }> {
+  return db.prepare(
+    'SELECT id, memory_id, content, agent_id, category, keywords, operation, superseded_at FROM memory_versions WHERE memory_id = ? ORDER BY superseded_at DESC, id DESC LIMIT ?'
+  ).all(memoryId, limit) as Array<MemoryRow & { operation: string; superseded_at: number }>
+}
+
+/**
+ * Delete a memory AND every version of it, in one transaction.
+ *
+ * A delete must not leave the content readable (PR #1357 fleet review,
+ * 2026-09-25): a memory deleted because it held something it should not -- a
+ * pasted secret -- would otherwise stay readable through
+ * GET /api/memories/<id>/versions and in every backup taken after. So a plain
+ * delete is final, and it takes the update pre-images with it too, not only
+ * the row: an earlier overwrite's pre-image can hold the very same secret.
+ *
+ * What protects against the ACCIDENTAL delete (the id=159 case, 2026-09-14) is
+ * no longer the version table but the route's guard: a large shared/warm row
+ * is refused with 409 unless the caller confirms with ?confirm_overwrite=1.
+ */
+export function deleteMemoryById(id: number): boolean {
+  const before = getMemoryById(id)
+  if (!before) return false
+  db.transaction(() => {
+    db.prepare('DELETE FROM memory_versions WHERE memory_id = ?').run(id)
+    db.prepare('DELETE FROM memories WHERE id = ?').run(id)
+  })()
+  // A shared row is listed for every agent, so evicting one owner is not enough.
+  if (before.category === 'shared') clearMemoryCache()
+  else if (before.agent_id) memoryCacheInvalidate(before.agent_id)
+  return true
+}
+
 export function updateMemory(id: number, content: string, category?: string, agentId?: string, keywords?: string, updatedBy?: string): boolean {
   const now = Math.floor(Date.now() / 1000)
   // Read the row's CURRENT owner and category before writing. The agentId
@@ -1936,9 +2039,13 @@ export function updateMemory(id: number, content: string, category?: string, age
   // on the ordinary edit -- it cannot be used to decide whose cache went
   // stale. Only the row itself knows that. content/keywords come along for the
   // staleness check below, for the same reason: the parameters alone cannot say
-  // whether the embedded text changed.
-  const before = db.prepare('SELECT agent_id, category, content, keywords, updated_at FROM memories WHERE id = ?').get(id) as
-    { agent_id: string | null; category: string | null; content: string | null; keywords: string | null; updated_at: number | null } | undefined
+  // whether the embedded text changed. One read serves three readers: the
+  // staleness check, the version snapshot (it needs the id, card 27ab6a18) and
+  // the MEMVERSION930 stamp below (it needs updated_at). getMemoryById alone
+  // does not carry updated_at, and without it the stamp would silently fall
+  // back to `now` (PR #1357 merge with #1661).
+  const before = db.prepare('SELECT id, agent_id, category, content, keywords, updated_at FROM memories WHERE id = ?').get(id) as
+    (MemoryRow & { updated_at: number | null }) | undefined
   // MEMIRASNYOM915: attributed write-trace. updated_at is set explicitly here
   // (which keeps the memories_touch trigger from firing); updated_by is the
   // caller's self-reported identity, or explicit NULL -- never the previous
@@ -1979,7 +2086,13 @@ export function updateMemory(id: number, content: string, category?: string, age
   if (agentId) { sets.push('agent_id = ?'); params.push(agentId) }
   if (keywords !== undefined) { sets.push('keywords = ?'); params.push(keywords) }
   params.push(id)
-  const changed = db.prepare(`UPDATE memories SET ${sets.join(', ')} WHERE id = ?`).run(...params).changes > 0
+  // The pre-image and the overwrite are ONE transaction: a snapshot that
+  // survives a failed write would offer a restore to a state that never ended,
+  // and a write without its snapshot is the unrecoverable case this closes.
+  const changed = db.transaction(() => {
+    if (before) snapshotMemoryVersion(before, 'update', now)
+    return db.prepare(`UPDATE memories SET ${sets.join(', ')} WHERE id = ?`).run(...params).changes > 0
+  })()
   if (changed) {
     if (before?.category === 'shared' || category === 'shared') {
       // A shared row is listed for every agent, so evicting one owner is not
