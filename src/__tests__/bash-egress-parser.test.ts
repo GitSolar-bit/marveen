@@ -438,6 +438,22 @@ describe('heredoc-fed interpreters', () => {
     expect(classify(`python3 -c "${body.replace(/\n/g, '; ')}"`)).toMatchObject({ deny: true, hosts: ['github.com'] })
     expect(classify(`python3 - <<'PY'\n${body}\nPY`)).toMatchObject({ deny: true, hosts: ['github.com'] })
   })
+  // The heredoc twin of 'a loop with too many values to judge one by one fails closed': past
+  // MAX_LOOP_VARIANTS the body is not read value by value, and without the heredoc-loop-unbounded
+  // branch the span would fall through to the plain reading, where $u is still the literal text
+  // `$u` (no URL, no host), so an external value hidden among the many would pass.
+  it('a heredoc body fed by a loop with too many values to judge one by one fails closed', () => {
+    const loopOf = (values: string[]) =>
+      `for u in ${values.join(' ')}; do python3 - <<EOF\nimport urllib.request; urllib.request.urlopen('$u')\nEOF\ndone`
+    const local = (n: number) => Array.from({ length: n }, (_, i) => `http://localhost/${i}`)
+    // 65 local values: past the cap of 64, so it is the unbounded branch that denies, not a host
+    expect(classify(loopOf(local(65)))).toEqual({ deny: true, reason: 'heredoc-loop-unbounded', hosts: [] })
+    // the external value is the LAST of 70: it is never judged, the cap is the only thing that stops it
+    expect(classify(loopOf([...local(69), 'https://example.org/x']))).toEqual({ deny: true, reason: 'heredoc-loop-unbounded', hosts: [] })
+    // CONTROLS: exactly at the cap the values ARE judged one by one (local passes, one external names its host)
+    expect(deny(loopOf(local(64)))).toBe(false)
+    expect(classify(loopOf([...local(63), 'https://example.org/x']))).toEqual({ deny: true, reason: 'heredoc-external', hosts: ['example.org'] })
+  })
   it('the hook process denies the heredoc shape and stays silent on its localhost twin', () => {
     const dir = mkdtempSync(join(tmpdir(), 'bash-egress-heredoc-'))
     try {
