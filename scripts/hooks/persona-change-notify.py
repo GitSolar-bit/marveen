@@ -22,6 +22,14 @@ Bash volt, nem Write. Egy eszkoz-nevre szuro or pontosan azt engedi at, aki
 szandekosan keruli meg. A lenyomat-osszevetes ezzel szemben azt meri, ami
 SZAMIT: megvaltozott-e a fajl. Mindegy, mi irta.
 
+OPT-IN (a reviewer kerese, #1546): az ertesites ALAPBOL KI VAN KAPCSOLVA. Az
+`PERSONA_GUARD_NOTIFY=1` (kornyezeti valtozo, vagy sor az install `.env`-jeben)
+kapcsolja be. KI allapotban a hook MINDENT megmerint, ami nem kuldes: a lenyomatot
+kiszamolja es elmenti, a valtozast a store/persona-changes.log-ba irja, de a
+Telegram-hivast NEM inditja. A hook a csatorna-plugin es a kimeno ledger KORUL
+hivja az api.telegram.org-ot, es minden jogos CLAUDE.md-iras utan jelezne, tehat
+hogy egy telepites akar-e ilyen ertesito-folyamot, az a tulajdonos dontese.
+
 Fail-open: ha barmi hibazik (nincs token, halozat), a hook csendben kilep 0-val.
 Egy ertesites-kuldesi hiba soha ne akadalyozzon meg egy szerkesztest; a naplo
 sor ilyenkor is megprobal megszuletni, es az utolag elarulja a valtozast.
@@ -84,6 +92,25 @@ def token(sd):
     except Exception:
         return None
     return None
+
+
+def notify_enabled():
+    """Opt-in switch: env first, then the install .env, default OFF.
+
+    Anything other than 1/true/yes/on (any case) counts as off, so a typo
+    fails toward the quiet, detect-and-log-only state.
+    """
+    v = os.environ.get("PERSONA_GUARD_NOTIFY")
+    if v is None or not v.strip():
+        v = ""
+        try:
+            with open(os.path.join(ROOT, ".env"), encoding="utf-8") as fh:
+                for line in fh:
+                    if line.startswith("PERSONA_GUARD_NOTIFY="):
+                        v = line.split("=", 1)[1].strip()
+        except Exception:
+            pass
+    return v.strip().lower() in ("1", "true", "yes", "on")
 
 
 def owner_chat(sd):
@@ -181,6 +208,9 @@ def main():
                 f.write(f"{stamp}\t{name}\t{kind}\t{tool}\t{lines} sor\n")
         except Exception:
             pass
+
+    if not notify_enabled():
+        return 0
 
     sd = state_dir()
     tok, chat = token(sd), owner_chat(sd)

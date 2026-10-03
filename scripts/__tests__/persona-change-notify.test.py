@@ -29,7 +29,7 @@ def check(name, got, want):
 class Tree:
     """A throwaway project root with the hook inside, a token, and a recorded network."""
 
-    def __init__(self, with_token=True):
+    def __init__(self, with_token=True, notify="1"):
         self.root = tempfile.mkdtemp(prefix="persona-guard-test-")
         hooks = os.path.join(self.root, "scripts", "hooks")
         os.makedirs(hooks)
@@ -43,6 +43,12 @@ class Tree:
             with open(os.path.join(self.state, "access.json"), "w") as f:
                 json.dump({"allowFrom": ["4242"]}, f)
         os.environ["TELEGRAM_STATE_DIR"] = self.state
+        # The send is opt-in (default off); every case below that expects a message
+        # turns it on explicitly, and the opt-in cases at the end set it per case.
+        if notify is None:
+            os.environ.pop("PERSONA_GUARD_NOTIFY", None)
+        else:
+            os.environ["PERSONA_GUARD_NOTIFY"] = notify
         spec = importlib.util.spec_from_file_location("pcn_" + str(id(self)), os.path.join(hooks, "persona-change-notify.py"))
         self.mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.mod)
@@ -129,6 +135,54 @@ def main():
     check("log written", "\tCLAUDE.md\tmodositva\t" in n.log(), True)
     n.done()
 
+
+    print("opt-in: DEFAULT (no env, no .env line) detects and logs, sends nothing")
+    d = Tree(notify=None)
+    d.write("CLAUDE.md", "a\n")
+    d.run()
+    d.write("CLAUDE.md", "a\nb\n")
+    check("exit code", d.run(), 0)
+    check("nothing sent", d.sent, [])
+    check("still logged", "\tCLAUDE.md\tmodositva\t" in d.log(), True)
+    print("opt-in: turning it on later does not replay the edit made while off")
+    os.environ["PERSONA_GUARD_NOTIFY"] = "1"
+    d.run()
+    check("no replay", d.sent, [])
+    d.write("CLAUDE.md", "a\nb\nc\n")
+    d.run()
+    check("a NEW edit after switching on is sent", len(d.sent), 1)
+    d.done()
+
+    print("opt-in: an install .env line turns it on (env unset)")
+    e = Tree(notify=None)
+    e.write(".env", "WEB_PORT=3420\nPERSONA_GUARD_NOTIFY=1\n")
+    e.write("CLAUDE.md", "a\n")
+    e.run()
+    e.write("CLAUDE.md", "changed\n")
+    e.run()
+    check("sent via .env", len(e.sent), 1)
+    e.done()
+
+    print("opt-in: an explicit env value wins over the .env line")
+    f = Tree(notify="0")
+    f.write(".env", "PERSONA_GUARD_NOTIFY=1\n")
+    f.write("CLAUDE.md", "a\n")
+    f.run()
+    f.write("CLAUDE.md", "changed\n")
+    f.run()
+    check("env 0 beats .env 1", f.sent, [])
+    check("logged", "\tCLAUDE.md\tmodositva\t" in f.log(), True)
+    f.done()
+
+    print("opt-in: a typo fails toward quiet")
+    g = Tree(notify="ture")
+    g.write("CLAUDE.md", "a\n")
+    g.run()
+    g.write("CLAUDE.md", "changed\n")
+    g.run()
+    check("typo sends nothing", g.sent, [])
+    g.done()
+    os.environ.pop("PERSONA_GUARD_NOTIFY", None)
     print()
     if FAILED:
         print("FAILED:", ", ".join(FAILED))
