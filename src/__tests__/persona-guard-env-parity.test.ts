@@ -14,7 +14,7 @@ import { parseEnvContent } from '../env-parse.js'
 const HOOK = join(__dirname, '..', '..', 'scripts', 'hooks', 'persona-change-notify.py')
 const KEY = 'PERSONA_GUARD_NOTIFY'
 
-const CORPUS: Record<string, string> = {
+const CORPUS: Record<string, string | Buffer> = {
   plain: `${KEY}=1\n`,
   'double quoted': `${KEY}="1"\n`,
   'single quoted': `${KEY}='1'\n`,
@@ -33,16 +33,21 @@ const CORPUS: Record<string, string> = {
   'quoted empty': `${KEY}=""\n`,
   'other key only': `WEB_PORT=1\n`,
   'equals in value': `${KEY}=a=b\n`,
-  'BOM first line': `﻿${KEY}=1\n`,
+  'BOM first line': `\ufeff${KEY}=1\n`,
+  // A lone \r is not a line break for the product (it splits on \n only).
+  'lone CR, key first': `${KEY}=1\rX=2`,
+  'lone CR, key second': `X=0\r${KEY}=1`,
+  // Invalid UTF-8 (a Latin-2 comment): Node decodes to U+FFFD and carries on.
+  'invalid UTF-8 before the key': Buffer.concat([Buffer.from('FOO='), Buffer.from([0xff, 0xfe]), Buffer.from(`\n${KEY}=1\n`)]),
 }
 
-function hookValue(env: string): string | null {
+function hookValue(env: string | Buffer): string | null {
   const root = mkdtempSync(join(tmpdir(), 'persona-parity-'))
   try {
     mkdirSync(join(root, 'scripts', 'hooks'), { recursive: true })
     copyFileSync(HOOK, join(root, 'scripts', 'hooks', 'persona-change-notify.py'))
     // Raw bytes: a text-mode write would turn \r\n into something else on Windows hosts.
-    spawnSync('python3', ['-c', `open(${JSON.stringify(join(root, '.env'))},'wb').write(${JSON.stringify(Buffer.from(env, 'utf-8').toString('latin1'))}.encode('latin1'))`])
+    spawnSync('python3', ['-c', `open(${JSON.stringify(join(root, '.env'))},'wb').write(${JSON.stringify((typeof env === 'string' ? Buffer.from(env, 'utf-8') : env).toString('latin1'))}.encode('latin1'))`])
     const r = spawnSync(
       'python3',
       [
@@ -61,7 +66,7 @@ function hookValue(env: string): string | null {
 describe('persona guard .env reader matches src/env-parse.ts', () => {
   for (const [label, content] of Object.entries(CORPUS)) {
     it(label, () => {
-      const product = parseEnvContent(content)[KEY]
+      const product = parseEnvContent(typeof content === 'string' ? content : content.toString('utf-8'))[KEY]
       expect(hookValue(content)).toBe(product === undefined ? null : product)
     })
   }

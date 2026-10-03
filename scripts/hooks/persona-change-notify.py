@@ -111,7 +111,10 @@ def _env_file_value(path, key):
     """
     found = None
     try:
-        with open(path, encoding="utf-8") as fh:
+        # newline="": a lone \r is NOT a line break in src/env-parse.ts (it splits on \n only), and
+        # Python's default universal newlines would make it one. errors="replace": Node decodes
+        # invalid UTF-8 to U+FFFD and carries on; a strict decode would drop the whole file.
+        with open(path, encoding="utf-8", errors="replace", newline="") as fh:
             content = fh.read()
     except Exception:
         return None
