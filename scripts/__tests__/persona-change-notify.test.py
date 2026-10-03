@@ -183,6 +183,25 @@ def main():
     check("typo sends nothing", g.sent, [])
     g.done()
     os.environ.pop("PERSONA_GUARD_NOTIFY", None)
+
+    print("opt-in: the .env reader follows src/env-parse.ts, one grammar for both")
+    for label, body, want_on in (
+        ('quoted "1"', 'PERSONA_GUARD_NOTIFY="1"\n', True),
+        ("single-quoted '1'", "PERSONA_GUARD_NOTIFY='1'\n", True),
+        ("indented line", "   PERSONA_GUARD_NOTIFY=1\n", True),
+        ("spaces around =", "PERSONA_GUARD_NOTIFY = 1\n", True),
+        ("CRLF line ends", "PERSONA_GUARD_NOTIFY=1\r\nWEB_PORT=1\r\n", True),
+        ("last line wins (on)", "PERSONA_GUARD_NOTIFY=0\nPERSONA_GUARD_NOTIFY=1\n", True),
+        ("last line wins (off)", "PERSONA_GUARD_NOTIFY=1\nPERSONA_GUARD_NOTIFY=0\n", False),
+        ("commented out", "# PERSONA_GUARD_NOTIFY=1\n", False),
+        ("inline comment is part of the value", "PERSONA_GUARD_NOTIFY=1 # on\n", False),
+        ("export prefix is a different key", "export PERSONA_GUARD_NOTIFY=1\n", False),
+        ("mismatched quotes", "PERSONA_GUARD_NOTIFY=\"1'\n", False),
+    ):
+        h = Tree(notify=None)
+        h.write(".env", body)
+        check(".env " + label, h.mod.notify_enabled(), want_on)
+        h.done()
     print()
     if FAILED:
         print("FAILED:", ", ".join(FAILED))

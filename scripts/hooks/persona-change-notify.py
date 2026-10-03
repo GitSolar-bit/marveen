@@ -94,6 +94,40 @@ def token(sd):
     return None
 
 
+# JavaScript's String.trim() set, which src/env-parse.ts uses. Python's str.strip() differs on
+# both sides: it also strips \x1c-\x1f, and it does NOT strip U+FEFF (a BOM on the first line).
+_JS_WS = " \t\n\v\f\r\u00a0\u1680\u2028\u2029\u202f\u205f\u3000\ufeff" + "".join(
+    chr(c) for c in range(0x2000, 0x200B))
+
+
+def _env_file_value(path, key):
+    """Value of `key` in an install .env, by the SAME grammar as src/env-parse.ts
+    (parseEnvContent): blank and `#` lines skipped, the line, key and value
+    trimmed, ONE pair of matching surrounding quotes stripped, the last line
+    wins. There is no `export` prefix and no inline comment there either, so
+    neither is understood here: one rule for the product and for this hook, or
+    an owner who writes "1" gets no alert and no warning (Sam's review of
+    #1546). src/__tests__/persona-guard-env-parity.test.ts pins the two together.
+    """
+    found = None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            content = fh.read()
+    except Exception:
+        return None
+    for line in content.split("\n"):
+        t = line.strip(_JS_WS)
+        if not t or t.startswith("#") or "=" not in t:
+            continue
+        k, v = t.split("=", 1)
+        k, v = k.strip(_JS_WS), v.strip(_JS_WS)
+        if v and v[0] in ("'", '"') and v[0] == v[-1]:
+            v = v[1:-1]
+        if k == key:
+            found = v
+    return found
+
+
 def notify_enabled():
     """Opt-in switch: env first, then the install .env, default OFF.
 
@@ -102,14 +136,7 @@ def notify_enabled():
     """
     v = os.environ.get("PERSONA_GUARD_NOTIFY")
     if v is None or not v.strip():
-        v = ""
-        try:
-            with open(os.path.join(ROOT, ".env"), encoding="utf-8") as fh:
-                for line in fh:
-                    if line.startswith("PERSONA_GUARD_NOTIFY="):
-                        v = line.split("=", 1)[1].strip()
-        except Exception:
-            pass
+        v = _env_file_value(os.path.join(ROOT, ".env"), "PERSONA_GUARD_NOTIFY") or ""
     return v.strip().lower() in ("1", "true", "yes", "on")
 
 
