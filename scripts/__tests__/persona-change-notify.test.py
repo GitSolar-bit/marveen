@@ -53,7 +53,10 @@ class Tree:
         self.mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.mod)
         self.sent = []
-        self.mod.urllib.request.urlopen = lambda req, timeout=None: self.sent.append(json.loads(req.data.decode()))
+        # The hook imports urllib.request only when it is about to send, so the module has no
+        # `urllib` attribute to stub; the recorder goes on the real module (the same object).
+        import urllib.request
+        urllib.request.urlopen = lambda req, timeout=None: self.sent.append(json.loads(req.data.decode()))
 
     def write(self, rel, text):
         p = os.path.join(self.root, rel)
@@ -182,6 +185,71 @@ def main():
     g.run()
     check("typo sends nothing", g.sent, [])
     g.done()
+    os.environ.pop("PERSONA_GUARD_NOTIFY", None)
+
+    print("urllib.request is imported only when a message is about to be sent")
+    import subprocess
+    z = Tree(notify=None)
+    z.write("CLAUDE.md", "a\n")
+    z.write("SOUL.md", "s\n")
+    hook = os.path.join(z.root, "scripts", "hooks", "persona-change-notify.py")
+    probe = (
+        "import io, runpy, sys\n"
+        "sys.stdin = io.StringIO('{\"tool_name\": \"Bash\"}')\n"
+        "try:\n"
+        "    runpy.run_path(sys.argv[1], run_name='__main__')\n"
+        "except SystemExit:\n"
+        "    pass\n"
+        "print('urllib.request' in sys.modules)\n"
+    )
+
+    def imported(notify):
+        env = dict(os.environ, PERSONA_GUARD_NOTIFY=notify)
+        out = subprocess.run([sys.executable, "-c", probe, hook], env=env, capture_output=True, text=True)
+        return out.stdout.strip() or out.stderr.strip()
+
+    check("first run, notify off: not imported", imported("0"), "False")
+    z.write("CLAUDE.md", "a\nb\n")
+    check("change detected, notify off: not imported", imported("0"), "False")
+    check("no change, notify on: not imported", imported("1"), "False")
+
+    # The send itself, in a fresh interpreter where nothing has imported urllib.request yet (the
+    # in-process cases above run in a process that already has it, which would hide a wrong import).
+    # socket.getaddrinfo is replaced through sitecustomize: it records the host the request is going
+    # to and fails the lookup, which the hook swallows. The message content is pinned in-process above.
+    stub_dir = tempfile.mkdtemp(prefix="persona-guard-stub-")
+    rec = os.path.join(stub_dir, "host.txt")
+    with open(os.path.join(stub_dir, "sitecustomize.py"), "w") as f:
+        f.write(
+            "import os, socket\n"
+            "def lookup(host, *a, **k):\n"
+            "    open(os.environ['PCN_REC'], 'w').write(str(host))\n"
+            "    raise OSError('stubbed')\n"
+            "socket.getaddrinfo = lookup\n"
+        )
+    z.write("CLAUDE.md", "a\nb\nc\n")
+    env = {k: v for k, v in os.environ.items() if not k.lower().endswith("_proxy")}  # a proxy would be the host recorded
+    env.update(PERSONA_GUARD_NOTIFY="1", PCN_REC=rec, PYTHONPATH=stub_dir)
+    out = subprocess.run([sys.executable, "-c", probe, hook], env=env, capture_output=True, text=True)
+    check("notify on + change, fresh interpreter: urllib.request is imported", out.stdout.strip(), "True")
+    check("and the request reaches the network layer for the Telegram API", open(rec).read() if os.path.exists(rec) else None, "api.telegram.org")
+    shutil.rmtree(stub_dir, ignore_errors=True)
+    z.done()
+
+    print("a failing import in the send path stays fail-open: exit 0, log still written, nothing sent")
+    q = Tree()
+    q.write("CLAUDE.md", "a\n")
+    q.run()
+    q.write("CLAUDE.md", "a\nb\n")
+    saved = sys.modules.get("urllib.request")
+    sys.modules["urllib.request"] = None  # makes `import urllib.request` raise ImportError
+    try:
+        check("exit code", q.run(), 0)
+    finally:
+        sys.modules["urllib.request"] = saved
+    check("nothing sent", q.sent, [])
+    check("still logged", "\tCLAUDE.md\tmodositva\t" in q.log(), True)
+    q.done()
     os.environ.pop("PERSONA_GUARD_NOTIFY", None)
 
     print("opt-in: the .env reader follows src/env-parse.ts, one grammar for both")
