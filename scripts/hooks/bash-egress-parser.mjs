@@ -20,9 +20,20 @@
 //      analysis, as if it were the command itself.
 // The command word is found past assignments, shell keywords and the PREFIX_WORDS commands with
 // their own options (timeout, stdbuf, nice, nohup, env, sudo, command, exec, time), on every path.
-// FALSE-POSITIVE POLICY, pending an owner decision: a body that uses a network primitive is denied
-// for ANY external URL in it, even when the call goes to localhost and the URL is only payload or a
-// comment. That is the one-liner rule, applied unchanged to heredoc bodies.
+// FALSE-POSITIVE POLICY. A body that uses a network primitive is denied for ANY external URL in it,
+// even when the call goes to localhost and the URL is only payload or a comment: the one-liner rule,
+// applied to heredoc bodies. ONE relaxation, from the maintainers' decision on #1669 (2026-10-06): a
+// PYTHON heredoc that merely MENTIONS a primitive and a URL in TEXT (the file it writes, a comment)
+// is not a call and passes. "Text" is decided by reading the program with its string literals and
+// comments blanked: a primitive that survives is code and the old rule applies. The relaxation is
+// OFF, and the old whole-text rule decides, for any body that (a) holds a construct that can RUN a
+// string or load code (exec, eval, compile, __import__, importlib, getattr, globals, subprocess,
+// os.system ... see PY_DYNAMIC), (b) imports anything outside PY_PLAIN_MODULES (so a module the
+// heredoc just wrote cannot be imported to do the call), (c) has an f-string (it runs its braces,
+// so its content stays code) with unbalanced braces, or a string the scan cannot read to its end.
+// Not relaxed: node, perl, ruby, php, deno, bun, PowerShell, and one-liners (-c). A written script
+// that is RUN BY ANOTHER COMMAND is the "network calls inside a script file" family below: the hook
+// never sees it, and the relaxation does not change that, it only stops denying the WRITE of it.
 // localhost / 127.0.0.1 / [::1] ALWAYS pass: the dashboard's own calls (memory, kanban, message
 // queue, approvals) go over http://localhost and a gate that cut them would silence the fleet.
 // Hosts are cut with a regex, not URL(), so http://localhost:$PORT stays local, while
@@ -131,6 +142,85 @@ function hasCodeFlag(cmd, args) {
 }
 function usesNetwork(cmd, text) {
   return NET_PRIMITIVE.test(text) || (POWERSHELL.test(cmd) && PS_NET_PRIMITIVE.test(text))
+}
+
+// --- Python heredoc: code versus text (maintainer decision on #1669) --------------------------------
+const PYTHON = /^python(?:\d+(?:\.\d+)?)?$/
+// Valid string prefixes, any case: r, b, u, f, and the two-letter br / rb / fr / rf.
+const PY_STRING_PREFIX = /^(?:[rR][bBfF]?|[bB][rR]?|[uU]|[fF][rR]?)$/
+// Constructs that can turn a string into running code, load code, start a process or open a URL. Read on
+// the program with its literals blanked, so the NAME is what is seen. Never complete, by design: it is the
+// first of two fences, the module allowlist below is the second, and both fall back to the OLD rule.
+const PY_DYNAMIC = new RegExp('\\b(?:exec|eval|compile|__import__|importlib|import_module|getattr|setattr|delattr|globals|locals|vars|' +
+  '__builtins__|builtins|__dict__|__loader__|runpy|subprocess|pty|ctypes|pickle|marshal|timeit|cProfile|profile|pdb|code|codeop|' +
+  'webbrowser|multiprocessing|system|popen|startfile|exec[lv]\\w*|spawn\\w*|fork\\w*|posix_spawn\\w*)\\b')
+// Modules a file-writing script plainly uses. Anything else, a module the heredoc may just have written
+// included, sends the body back to the old whole-text rule.
+const PY_PLAIN_MODULES = new Set(['os', 'sys', 'json', 're', 'pathlib', 'datetime', 'time', 'textwrap', 'shutil', 'csv', 'io',
+  'hashlib', 'base64', 'collections', 'itertools', 'math', 'string', 'tempfile', 'glob', 'argparse', 'html', 'unicodedata', 'uuid',
+  'random', 'statistics', 'zipfile', 'tarfile', 'difflib', 'pprint', 'typing', 'dataclasses', 'functools', 'operator', 'enum', 'fnmatch'])
+// The program with its string literals and comments blanked (newlines kept), or null when the scan cannot
+// vouch for where a string ends. An f-string is NOT blanked: it runs its braces, so its text counts as code.
+export function pythonCodeOnly(text) {
+  const out = []
+  const n = text.length
+  let i = 0
+  while (i < n) {
+    const c = text[i]
+    if (c === '#') {
+      let j = text.indexOf('\n', i)
+      if (j === -1) j = n
+      out.push(' '.repeat(j - i)); i = j; continue
+    }
+    if (c !== '"' && c !== "'") { out.push(c); i++; continue }
+    let k = i
+    while (k > 0 && /[A-Za-z0-9_]/.test(text[k - 1])) k--
+    const word = text.slice(k, i)
+    if (word !== '' && !PY_STRING_PREFIX.test(word)) return null   // return"x", ab"x": not a plain literal
+    const triple = text.startsWith(c.repeat(3), i)
+    const delim = triple ? c.repeat(3) : c
+    let j = i + delim.length
+    let closed = false
+    while (j < n) {
+      if (text[j] === '\\') { j += 2; continue }
+      if (text.startsWith(delim, j)) { closed = true; break }
+      if (!triple && text[j] === '\n') return null                // unterminated single-line string
+      j++
+    }
+    if (!closed) return null
+    const body = text.slice(i + delim.length, j)
+    if (/[fF]/.test(word)) {
+      // Brace balance: an unbalanced f-string means this scan ended it where Python (3.12 allows the same
+      // quote inside the braces) did not, and from there on the scan would be blanking real code.
+      const open = (body.match(/\{/g) ?? []).length, close = (body.match(/\}/g) ?? []).length
+      if (open !== close) return null
+      out.push(delim + body + delim)
+    } else {
+      out.push(delim + body.replace(/[^\n]/g, ' ') + delim)
+    }
+    i = j + delim.length
+  }
+  return out.join('')
+}
+function pythonImportsPlain(code) {
+  for (const raw of code.split(/[\n;]/)) {
+    const st = raw.trim()
+    if (!/\bimport\b/.test(st)) continue
+    let m
+    if ((m = /^import\s+(.+)$/.exec(st))) {
+      for (const part of m[1].split(',')) if (!PY_PLAIN_MODULES.has(part.trim().split(/\s+/)[0].split('.')[0])) return false
+    } else if ((m = /^from\s+([\w.]+)\s+import\b/.exec(st))) {
+      if (!PY_PLAIN_MODULES.has(m[1].split('.')[0])) return false
+    } else return false                                           // `try: import x`, `x = 1; import` glued forms
+  }
+  return true
+}
+// Does this Python body USE the network, as opposed to MENTION it? Only a primitive in CODE counts, and
+// only when nothing in the body can run a string or load code (see the header).
+function pythonUsesNetwork(text) {
+  const code = pythonCodeOnly(text)
+  if (code === null || PY_DYNAMIC.test(code) || !pythonImportsPlain(code)) return NET_PRIMITIVE.test(text)
+  return NET_PRIMITIVE.test(code)
 }
 // Words that can stand before the real command word of a sub-command. The shell keywords are here
 // because `for p in a b; do curl ...` splits at `;` into a span that starts with `do`, and without
@@ -604,7 +694,7 @@ export function classify(command, depth = 0, vendorHosts = new Set(), vendorDoma
         if (r.deny) return { ...r, reason: `heredoc-${r.reason}` }
         continue
       }
-      if (!usesNetwork(cmd, text)) continue
+      if (!(PYTHON.test(cmd.toLowerCase()) ? pythonUsesNetwork(text) : usesNetwork(cmd, text))) continue
       const found = [...text.matchAll(URL_RE)].map((m) => m[0]).filter(isExternal).map(hostOf)
       const hosts = [...new Set(found)].filter((h) => !vendorHosts.has(h) && !hostInDomains(h, vendorDomains))
       if (hosts.length) return { deny: true, reason: 'heredoc-external', hosts }
