@@ -31,7 +31,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # missing setting. Resolution order:
 #   1. MARVEEN_BOT_EMAIL in the environment
 #   2. MARVEEN_BOT_EMAIL= in the install's .env
-#   3. nothing -> stop LOUDLY, below
+#   3. nothing -> SKIP quietly (one line, exit 0), below: sync-hooks.sh runs every
+#      install-*-hook.sh on each update, so an install that never opted in to this gate
+#      must not get an error block and a non-zero exit every time. A value that IS set
+#      but is not an address stays a loud refusal (the shape check): that is someone
+#      configuring the gate and getting it wrong.
 #
 # AND NOT FROM THE REPO CONFIG, which is the one trap this gate has: `user.email`
 # is exactly what `git -c user.email=` overrides, so a gate that read its expected
@@ -57,19 +61,9 @@ if [ -z "$BOT_EMAIL" ] && [ -f "$ROOT/.env" ]; then
   BOT_EMAIL="$(sed -n 's/^[[:space:]]*MARVEEN_BOT_EMAIL[[:space:]]*=[[:space:]]*//p' "$ROOT/.env" | tail -1 | sed "s/${CR}*\$//" | sed 's/[[:space:]]*$//; s/^"//; s/"$//; s/^'"'"'//; s/'"'"'$//')"
 fi
 if [ -z "$BOT_EMAIL" ]; then
-  echo "install-commit-identity-hook: NOT INSTALLED -- no bot identity configured." >&2
-  echo "" >&2
-  echo "  This gate refuses any commit whose author or committer is not this install's" >&2
-  echo "  bot. It cannot guess which identity that is, and it must not: a guessed" >&2
-  echo "  default would be the identity of the fleet this file came from." >&2
-  echo "" >&2
-  echo "  Set it once, in the install's .env:" >&2
-  echo "      MARVEEN_BOT_EMAIL=<id>+<login>@users.noreply.github.com" >&2
-  echo "  or for a single run:" >&2
-  echo "      MARVEEN_BOT_EMAIL=... bash scripts/install-commit-identity-hook.sh" >&2
-  echo "" >&2
-  echo "  Use the noreply form, not a personal address: that is the point of the gate." >&2
-  exit 1
+  # Not configured means not opted in: say so in one line and leave the hooks as they are.
+  echo "install-commit-identity-hook: skipped (MARVEEN_BOT_EMAIL not set; set it in .env to enable the gate)"
+  exit 0
 fi
 
 # THE RESIDUAL HOLE OF A BAKED VALUE, and the one Sam's shape-check idea points at:
@@ -180,7 +174,6 @@ if [ "\$bad" = "1" ]; then
   echo "" >&2
   echo "FIX THE REPO, NOT THE CALL. Do NOT pass -c user.email=, GIT_AUTHOR_EMAIL= or --author=:" >&2
   echo "all three override the config, and that is exactly how the addresses got out." >&2
-  echo "  git config user.name  GitSolar-bit" >&2
   echo "  git config user.email \$BOT_EMAIL" >&2
   echo "" >&2
   echo "Override knowingly (nothing checks it afterwards): SKIP_COMMIT_IDENTITY_GATE=1 git commit ..." >&2

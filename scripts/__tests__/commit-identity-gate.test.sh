@@ -79,26 +79,44 @@ git init -q .
 git config user.name "GitSolar-bit"
 git config user.email "$BOT"
 
-# The installer must be idempotent: the second run is what a host update does.
-# NO BOT IDENTITY: the installer must stop loudly and install NOTHING. This is
-# the case that matters for an upstream file -- a baked-in default would be the
-# identity of the fleet the file came from, and the failure would look like a
-# broken gate instead of a missing setting.
-if bash scripts/install-commit-identity-hook.sh >/dev/null 2>&1; then
-  fail "the installer succeeded with no MARVEEN_BOT_EMAIL configured"
-elif [ -e .git/hooks/pre-commit.d/15-commit-identity ]; then
-  fail "the installer failed but left a gate behind"
+# NO BOT IDENTITY CONFIGURED = NOT OPTED IN: the installer must say so in ONE line, exit 0 and
+# install NOTHING. sync-hooks.sh runs every install-*-hook.sh on each update, so an install that
+# never set MARVEEN_BOT_EMAIL must not get an error block and a non-zero exit every time. There
+# is still no default identity: a baked-in default would be the identity of the fleet this file
+# came from, which is why the answer is "skip", not "guess".
+OUT="$(bash scripts/install-commit-identity-hook.sh 2>&1)"
+RC=$?
+[ "$RC" -eq 0 ] && pass "with no identity configured the installer exits 0" \
+  || fail "with no identity configured the installer exited $RC (an update would warn every time)"
+[ "$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')" = "1" ] && pass "and says so in exactly one line" \
+  || fail "the skip was not one line: $OUT"
+case "$OUT" in
+  *"skipped (MARVEEN_BOT_EMAIL not set"*) pass "and names the setting that enables the gate" ;;
+  *) fail "the skip line does not name MARVEEN_BOT_EMAIL: $OUT" ;;
+esac
+if [ -e .git/hooks/pre-commit.d/15-commit-identity ]; then
+  fail "the installer skipped but left a gate behind"
 else
-  pass "with no identity configured the installer stops and installs nothing"
+  pass "and installs no gate"
 fi
+
+# The idempotency check below compares two hashes. GNU has sha256sum, macOS has shasum; and a
+# missing tool must not turn the check into "two empty strings are equal", so the check itself
+# demands a non-empty hash (an `exit` inside the helper would only leave the $( ) subshell).
+sha() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+  else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
 
 # The install's .env is the supported place, and the key is read the way the
 # product's readEnvFile reads it: a leading 'export ' does NOT match.
 printf 'export MARVEEN_BOT_EMAIL=%s\n' "$BOT" > .env
-if bash scripts/install-commit-identity-hook.sh >/dev/null 2>&1; then
-  fail 'an export-prefixed key in .env was accepted (the product would not)'
+OUT="$(bash scripts/install-commit-identity-hook.sh 2>&1)"
+RC=$?
+if [ "$RC" -eq 0 ] && [ ! -e .git/hooks/pre-commit.d/15-commit-identity ]; then
+  pass 'an export-prefixed key in .env is not a key (parity with readEnvFile): skipped, nothing installed'
 else
-  pass 'an export-prefixed key in .env is not a key (parity with readEnvFile)'
+  fail "an export-prefixed key in .env was accepted or broke the install (rc=$RC): $OUT"
 fi
 printf 'MARVEEN_BOT_EMAIL=%s\n' "$BOT" > .env
 
@@ -117,11 +135,11 @@ fi
 printf 'MARVEEN_BOT_EMAIL=%s\n' "$BOT" > .env
 
 bash scripts/install-commit-identity-hook.sh >/dev/null 2>&1
-FIRST="$(sha256sum .git/hooks/pre-commit.d/15-commit-identity | cut -d' ' -f1)"
+FIRST="$(sha .git/hooks/pre-commit.d/15-commit-identity)"
 bash scripts/install-commit-identity-hook.sh >/dev/null 2>&1
-SECOND="$(sha256sum .git/hooks/pre-commit.d/15-commit-identity | cut -d' ' -f1)"
-[ "$FIRST" = "$SECOND" ] && pass "installing twice leaves the same gate (idempotent)" \
-  || fail "the gate changed between two installs"
+SECOND="$(sha .git/hooks/pre-commit.d/15-commit-identity)"
+[ -n "$FIRST" ] && [ "$FIRST" = "$SECOND" ] && pass "installing twice leaves the same gate (idempotent)" \
+  || fail "the gate changed between two installs, or no sha256 tool produced a hash"
 [ -x .git/hooks/pre-commit ] && pass "the dispatcher is executable" || fail "no executable dispatcher"
 
 # 1. The bot identity passes. If this fails, the gate blocks everything.
@@ -150,6 +168,9 @@ try_blocked() {
 try_blocked "git -c user.email" git -c user.email=wrong@example.invalid -c user.name=W commit -q -m x
 try_blocked "GIT_AUTHOR_EMAIL" env GIT_AUTHOR_NAME=W GIT_AUTHOR_EMAIL=wrong2@example.invalid git commit -q -m x
 try_blocked "git commit --author=" git commit -q -m x --author="W <wrong3@example.invalid>"
+# The committer half on its own: the author is the (right) config identity, only the committer is
+# wrong. Removing the committer check from the gate used to leave every other case green.
+try_blocked "GIT_COMMITTER_EMAIL (right author)" env GIT_COMMITTER_NAME=W GIT_COMMITTER_EMAIL=wrong4@example.invalid git commit -q -m x
 
 # 5. The documented override works, and says that nothing checks it afterwards.
 echo z >> f.txt; git add .
@@ -215,7 +236,11 @@ fi
 #    gate: an empty value is the shape where a string compare would accidentally
 #    succeed if it ever reached one.
 GUARDFILE=".git/hooks/pre-commit.d/15-commit-identity"
-sed -i 's|^BOT_EMAIL=.*|BOT_EMAIL=""|' "$GUARDFILE"
+# Not `sed -i`: BSD sed reads its argument as a backup suffix. `cat >` keeps the exec bit, and no
+# second copy of the gate is left in pre-commit.d/, where the dispatcher would run it.
+TAMPERED="$WORK/tampered-gate"
+sed 's|^BOT_EMAIL=.*|BOT_EMAIL=""|' "$GUARDFILE" > "$TAMPERED" && cat "$TAMPERED" > "$GUARDFILE"
+grep -q '^BOT_EMAIL=""$' "$GUARDFILE" || fail "the tampering did not take effect (the next case would measure nothing)"
 echo s >> f.txt; git add .
 if git commit -q -m x >/dev/null 2>&1; then
   fail "an EMPTY baked identity let a commit through"
