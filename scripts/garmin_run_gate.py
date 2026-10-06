@@ -57,6 +57,17 @@ MARVEEN_DIR = Path(__file__).resolve().parents[1]
 TOKEN_FILE = MARVEEN_DIR / "store" / ".dashboard-token"
 MESSAGES_URL = "http://localhost:3420/api/messages"
 
+# The whitespace set of JavaScript's String.prototype.trim() (ECMA-262 WhiteSpace plus
+# LineTerminator), which is what the product's readEnvFile trims with. It is NOT Python's
+# str.strip() set: that one also strips U+001C..U+001F and U+0085, and does not strip U+FEFF
+# (the byte-order mark), so a BOM-saved .env would lose its first key.
+_JS_TRIM = (
+    "\t\n\v\f\r \u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
 def main_agent_id() -> str:
     """The installation's own main-agent id, resolved THE WAY THE PRODUCT DOES.
 
@@ -91,19 +102,26 @@ def main_agent_id() -> str:
         same one; a trailing comment is part of the value
       - an EMPTY value stays `""`, because the product's `??` is nullish-only
       - the LAST matching line wins, because the product overwrites the key
+      - the file is read as bytes and decoded with U+FFFD for invalid sequences (what Node's
+        readFileSync(..., 'utf-8') does), so one Latin-2 byte in a comment does not kill the
+        gate, which resolves this at import
+      - lines are split on "\n" ONLY (str.splitlines() also splits on form feed, U+2028 and
+        others, which the product keeps inside the line)
+      - "trim" is JavaScript's trim set, see _JS_TRIM: it includes U+FEFF, so a UTF-8 BOM in
+        front of the first key is trimmed away like in the product
     """
     env = MARVEEN_DIR / ".env"
     talalt: str | None = None
     try:
-        for line in env.read_text(encoding="utf-8").splitlines():
-            trimmelt = line.strip()
+        for line in env.read_bytes().decode("utf-8", errors="replace").split("\n"):
+            trimmelt = line.strip(_JS_TRIM)
             if not trimmelt or trimmelt.startswith("#"):
                 continue
             egyenlo = trimmelt.find("=")
             if egyenlo == -1:
                 continue
-            kulcs = trimmelt[:egyenlo].strip()
-            ertek = trimmelt[egyenlo + 1:].strip()
+            kulcs = trimmelt[:egyenlo].strip(_JS_TRIM)
+            ertek = trimmelt[egyenlo + 1:].strip(_JS_TRIM)
             if (ertek.startswith('"') and ertek.endswith('"')) or (
                 ertek.startswith("'") and ertek.endswith("'")
             ):

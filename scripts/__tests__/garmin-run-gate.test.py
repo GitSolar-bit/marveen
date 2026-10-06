@@ -228,15 +228,35 @@ def scenario_env_reader_shapes() -> None:
         ("# MAIN_AGENT_ID=kikommentezve\nMAIN_AGENT_ID=valodi\n", "valodi"),
         # egyoldalu idezojel NEM jon le
         ("MAIN_AGENT_ID='egyoldalu\n", "'egyoldalu"),
+        # --- A 2026-09-27 TOVABBI NEGY ALAK (a review merese a termek sajat readEnvFile-ja ellen) ---
+        # UTF-8 BOM az elso soron: a termek JS trim()-je a U+FEFF-et is levagja, a Python strip()-je
+        # nem, es ez nema felreiranyitas lett volna (a riasztas a `marveen`-nek menne).
+        ("\ufeffMAIN_AGENT_ID=bomos\n", "bomos"),
+        # ervenytelen UTF-8 bajt egy megjegyzesben: a termek U+FFFD-re cserel es megy tovabb; a kapu
+        # eddig UnicodeDecodeError-ral meghalt (a memoria-kapu importkor oldja fel az azonositot).
+        (b"# latin-2 megjegyz\xe9s\nMAIN_AGENT_ID=bajtos\n", "bajtos"),
+        # lapdobas az ertekben: a termek csak "\n"-nel vag, a splitlines() itt ketteszedte volna
+        ("MAIN_AGENT_ID=lap\fdobas\n", "lap\fdobas"),
+        # U+2028 a soron belul: ugyanez
+        ("MAIN_AGENT_ID=sor\u2028X=1\n", "sor\u2028X=1"),
+        # a trim-halmaz HATARA a masik iranyban: a Python strip() levagna, a JS trim() NEM
+        ("MAIN_AGENT_ID=fs\x1c\n", "fs\x1c"),
+        ("MAIN_AGENT_ID=nel\x85\n", "nel\x85"),
+        # es amit a JS trim() levag, de a Python strip() nem: a BOM az ertek vegen
+        ("MAIN_AGENT_ID=vegen\ufeff\n", "vegen"),
     ]
     eredeti = gate.MARVEEN_DIR
     try:
         with tempfile.TemporaryDirectory() as d:
             gate.MARVEEN_DIR = Path(d)
             for tartalom, vart in esetek:
-                (gate.MARVEEN_DIR / ".env").write_text(tartalom, encoding="utf-8")
+                env_fajl = gate.MARVEEN_DIR / ".env"
+                if isinstance(tartalom, bytes):
+                    env_fajl.write_bytes(tartalom)
+                else:
+                    env_fajl.write_text(tartalom, encoding="utf-8")
                 kapott = gate.main_agent_id()
-                cimke = tartalom.strip().replace("\n", " ")[:38]
+                cimke = ascii(tartalom).replace("\\n", " ")[:46]
                 check(f"{cimke} -> {vart!r}", kapott, vart)
     finally:
         gate.MARVEEN_DIR = eredeti
