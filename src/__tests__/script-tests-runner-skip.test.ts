@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { SKIP_EXIT, suiteOutcome } from './setup/suite-outcome.js'
+import { SKIP_EXIT, hasSkipReason, suiteOutcome } from './setup/suite-outcome.js'
 
 // WAITFORSKIP925. A suite whose positive control cannot be met on this platform
 // has measured NOTHING. Both obvious answers are wrong:
@@ -46,6 +46,16 @@ describe('the suite runner tells a SKIP apart from a pass and from a failure', (
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  it('the reason must be the marker on a line of its own, not any line containing SKIP', () => {
+    expect(hasSkipReason('SKIP (control unmet): the trap did not reproduce (rc=0)')).toBe(true)
+    expect(hasSkipReason('some output\nSKIP (control unmet): reason')).toBe(true)
+    // the shapes an unanchored /SKIP/ let through
+    expect(hasSkipReason('FAIL  seed case (SEED_SKIP=1)')).toBe(false)
+    expect(hasSkipReason('SKIP  lsof fallback: lsof not installed here')).toBe(false)
+    expect(hasSkipReason('  indented SKIP (control unmet): not at the start of a line')).toBe(false)
+    expect(hasSkipReason('')).toBe(false)
   })
 
   it('wait-for.test.sh says SKIP out loud when its control is unmet', () => {

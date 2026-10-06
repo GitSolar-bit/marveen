@@ -19,7 +19,7 @@ import { describe, it, expect } from 'vitest'
 import { spawnSync } from 'node:child_process'
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { suiteOutcome } from './setup/suite-outcome.js'
+import { SKIP_REASON, hasSkipReason, suiteOutcome } from './setup/suite-outcome.js'
 
 const ROOT = join(__dirname, '..', '..')
 const DIR = join(ROOT, 'scripts', '__tests__')
@@ -34,7 +34,10 @@ describe('scripts/__tests__ suites', () => {
     expect(SUITES.length).toBeGreaterThan(20)
   })
 
-  it.each(SUITES)('%s passes', (name) => {
+  // it.for, not it.each: the case function gets the test context, and ctx.skip() makes the
+  // outcome a SKIPPED test that the reporter counts and shows. An early `return` from an `it`
+  // titled "passes" is counted as a pass, which is the silent skip this branch exists to prevent.
+  it.for(SUITES)('%s passes', { timeout: 310_000 }, (name, ctx) => {
     const runner = name.endsWith('.py') ? 'python3' : 'bash'
     const res = spawnSync(runner, [join(DIR, name)], {
       encoding: 'utf-8',
@@ -45,11 +48,14 @@ describe('scripts/__tests__ suites', () => {
       // A suite whose positive control cannot be met on this platform has
       // measured NOTHING here. Failing it is a false alarm (see wait-for on
       // macOS); passing it silently is worse, because a skip would then be
-      // indistinguishable from a green run. So it is loud, and the reason is
-      // required to be there -- a bare 77 with no explanation is a failure.
-      const why = `${res.stdout ?? ''}${res.stderr ?? ''}`
-      console.warn(`--- ${name} SKIPPED (exit 77) ---\n${why}`)
-      expect(why, `${name} exited 77 without saying why`).toMatch(/SKIP/)
+      // indistinguishable from a green run. So it is a counted skip, and the
+      // reason is required to be there -- a bare 77 with no explanation is a
+      // failure. The streams are joined with a newline so that the marker on
+      // stderr starts a line even when stdout did not end with one.
+      const why = `${res.stdout ?? ''}\n${res.stderr ?? ''}`
+      expect(hasSkipReason(why), `${name} exited 77 without a "SKIP (control unmet)" line:\n${why}`).toBe(true)
+      const line = why.split('\n').find((l) => SKIP_REASON.test(l)) ?? 'control unmet'
+      ctx.skip(`${name}: ${line}`)
       return
     }
     if (res.status !== 0) {
@@ -57,5 +63,5 @@ describe('scripts/__tests__ suites', () => {
       console.error(`--- ${name} stderr ---\n${res.stderr ?? ''}`)
     }
     expect(res.status).toBe(0)
-  }, 310_000)
+  })
 })
