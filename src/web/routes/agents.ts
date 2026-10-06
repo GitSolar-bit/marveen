@@ -116,7 +116,7 @@ import {
   capturePane,
   delay,
 } from '../agent-process.js'
-import { addDesiredAgent, removeDesiredAgent } from '../agent-desired-state.js'
+import { addDesiredAgent, getDesiredAgents, removeDesiredAgent } from '../agent-desired-state.js'
 import { RemoteStatusCache } from '../remote-status-cache.js'
 import type { AgentRunState } from '../ssh-tmux.js'
 import { readActiveModelFromProjectDir, readContextTokensFromProjectDir } from '../active-model.js'
@@ -2252,6 +2252,29 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       return true
     }
     if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
+    // RESTARTSTOPPED1005: a restart must not resurrect an agent that was stopped
+    // on purpose. restartAgentProcess() starts a non-running agent outright, so
+    // any caller that walks the whole agent list (a token-swap or maintenance
+    // script) used to bring back every agent an operator had stopped -- measured
+    // 2026-10-05: a fleet-wide token swap restarted a deliberately paused agent,
+    // and the explicit /stop that took it off the desired run-state counted for
+    // nothing. A running agent restarts as before; a stopped one that is still
+    // desired (it should be up) is started, as the reconciler would; a stopped one
+    // that is NOT desired is refused, and /start is the one door that runs it.
+    //
+    // A remote agent whose host does not answer reads as not-running too, and
+    // "stopped on purpose" would be the wrong diagnosis there -- nobody knows
+    // whether it runs. That case gets its own answer (503, host-unreachable)
+    // and nothing is attempted: a restart over a dead ssh link cannot succeed.
+    const runState = agentRunState(name)
+    if (runState === 'unreachable') {
+      json(res, { error: 'Agent runs on a remote host that is not reachable right now, so its run state is unknown; nothing was restarted', code: 'host-unreachable' }, 503)
+      return true
+    }
+    if (runState !== 'running' && !getDesiredAgents().has(name)) {
+      json(res, { error: 'Agent is not running and was stopped on purpose (not in the desired run-state); use /start to run it', code: 'stopped-not-desired' }, 409)
+      return true
+    }
     // Optional { "fresh": true } body -> no `--continue` (see /start note).
     let restartFresh = false
     try { restartFresh = JSON.parse((await readBody(req)).toString() || '{}').fresh === true } catch {}
