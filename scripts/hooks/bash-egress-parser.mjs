@@ -218,6 +218,9 @@ function pythonImportsPlain(code) {
 // Does this Python body USE the network, as opposed to MENTION it? Only a primitive in CODE counts, and
 // only when nothing in the body can run a string or load code (see the header).
 function pythonUsesNetwork(text) {
+  // Python reads identifiers as NFKC, so a fullwidth `ｅｘｅｃ(...)` is `exec(...)`: normalize first, or
+  // the fence below does not see it. The fallback rule reads the normalized text too, which is stricter.
+  text = text.normalize('NFKC')
   const code = pythonCodeOnly(text)
   if (code === null || PY_DYNAMIC.test(code) || !pythonImportsPlain(code)) return NET_PRIMITIVE.test(text)
   return NET_PRIMITIVE.test(code)

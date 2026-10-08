@@ -514,6 +514,25 @@ describe('a Python heredoc that only MENTIONS a primitive and a URL', () => {
     expect(classify(`python3 <<< "open('n','w').write('urlopen https://example.org/')"`).deny).toBe(false)
     expect(classify(`timeout 20 python3 - <<'PY'\n${body}\nPY`).deny).toBe(false)
   })
+  // Maintainer request on #1669 (2026-10-08): Python reads identifiers as NFKC, so a fullwidth
+  // `ｅｘｅｃ(...)` IS `exec(...)` and runs. The PY_DYNAMIC fence looked at the raw characters and did not
+  // see it, so the relaxation let it through where the previous head denied it. The body is normalized
+  // before the scan; a fullwidth word inside a literal that only MENTIONS a primitive still passes.
+  it('reads the body as NFKC: a fullwidth exec / urlopen is the real name and keeps the old rule', () => {
+    const FULLWIDTH_EXEC = `ｅｘｅｃ('import urllib.request as u; u.urlopen("https://evil.example/x")')`
+    expect(classify(py(FULLWIDTH_EXEC))).toMatchObject({ deny: true, reason: 'heredoc-external', hosts: ['evil.example'] })
+    // the same fence with the other dynamic names, written fullwidth
+    for (const name of ['ｅｖａｌ', 'ｃｏｍｐｉｌｅ', '__ｉｍｐｏｒｔ__', 'ｇｅｔａｔｔｒ']) {
+      const body = `${name}('urllib.request.urlopen("https://evil.example/x")')`
+      expect({ name, deny: classify(py(body)).deny }).toEqual({ name, deny: true })
+    }
+    // a fullwidth primitive in CODE is the primitive: the call is denied even with no dynamic construct
+    const FULLWIDTH_CALL = `import urllib.request\nurllib.request.ｕｒｌｏｐｅｎ('https://evil.example/x')`
+    expect(classify(py(FULLWIDTH_CALL))).toMatchObject({ deny: true, reason: 'heredoc-external' })
+    // CONTROLS: ASCII exec was already denied, and fullwidth text inside a LITERAL that writes a file still passes
+    expect(classify(py(FULLWIDTH_EXEC.replace('ｅｘｅｃ', 'exec'))).deny).toBe(true)
+    expect(classify(py(`open('n.md','w').write("ｅｘｅｃ and ｕｒｌｏｐｅｎ('https://example.org/') are only words here")`)).deny).toBe(false)
+  })
   it('the hook process stays silent on a file-writing heredoc', () => {
     const dir = mkdtempSync(join(tmpdir(), 'bash-egress-filewrite-'))
     try {
@@ -716,6 +735,12 @@ describe('still open after (a) -- pinned on purpose', () => {
   const OPEN = [
     'bash ./fetch.sh', // the network call is inside the script file
     'python3 fetch.py',
+    // EGRESSHEREDOC924, #1669 request 2 (measured 2026-10-08): a script WRITTEN by one command and RUN by
+    // another, or by the same line. The same call inline (-c) or in a heredoc fed to the interpreter is
+    // denied; here the body is only text for `cat` / `open().write()` and the run line holds no URL.
+    // Closing it means reading files at hook time, which is left to a follow-up (see the PR comment).
+    `cat > /tmp/s.py <<'PY'\nimport urllib.request\nurllib.request.urlopen('https://example.org/x')\nPY\npython3 /tmp/s.py`,
+    `python3 - <<'PY'\nopen('/tmp/s.py','w').write("import urllib.request\\nurllib.request.urlopen('https://example.org/x')\\n")\nPY`,
     // a program PIPED into an interpreter (the heredoc is on cat, not on python3); the heredoc on the
     // interpreter itself is closed since EGRESSHEREDOC924, see 'heredoc-fed interpreters' below
     `cat <<'PY' | python3 -\nimport urllib.request; urllib.request.urlopen('https://example.org')\nPY`,
