@@ -27,6 +27,45 @@ Override an intentional rewrite of a protected branch:
 ALLOW_FORCE_PUSH=1 git push ...
 ```
 
+# Outgoing code needs a Sam-green trace (pre-push)
+
+Laci's rule (2026-09-30): code that goes outward (a push, a force-push, an update of a PR
+branch) goes only after Sam's approval; a green test is not enough. The rule used to live in
+two CLAUDE.md files and nothing enforced it.
+
+`scripts/install-sam-green-gate-hook.sh` (run by `scripts/sync-hooks.sh`, like the other
+installers) copies `scripts/git-hooks/pre-push-sam-green.py` into
+`.git/hooks/pre-push.d/30-sam-green-gate`. It applies to every agent that pushes from this
+repository, since the hook is repo-level.
+
+**What counts as the trace.** A message in the fleet mailbox that is from `sam` (status not
+`failed`) and contains a line of its own, exactly:
+
+```
+SAM-ZOLD <8 to 40 hex digits of the head commit>
+```
+
+The hash binds the green to the commit being pushed, so an amend, a rebase or a further commit
+on the PR branch needs a new line. Text after the hash, a wrapped or inline mention, a prefix
+shorter than 8 digits and a row from another sender do not count. The gate reads
+`/api/messages?agent=sam` (up to 2000 of Sam's messages back) with the dashboard token.
+
+**What needs no trace:** a deletion, and a push that sends no commit the destination lacks
+(already on the target remote's tracking refs; for a destination other than `origin`, also
+already on `origin`). Anything that cannot be verified (dashboard down, token unreadable, a ref
+that does not resolve) blocks.
+
+**What it is not.** It guards against *forgetting* the rule, not against a deliberate bypass:
+the trace is self-declared (one shared bearer token writes any `from_agent`), and
+`--no-verify` on the push skips every pre-push hook without leaving a line. Do not read a pass
+as proof that Sam reviewed the change.
+
+**The way through, only on Laci's explicit instruction for that push:** set
+`SKIP_SAM_GREEN_GATE=1` and `SAM_GREEN_SKIP_REASON="Laci TG <message id>: <why>"` in the
+environment of the push command. The reason is mandatory and the call is appended to
+`store/push-samgreen-skips.log` (who, when, remote, refs, reason); if the line cannot be
+written the push is refused.
+
 # Bash egress deny rules
 
 `scripts/hooks/egress-gate.mjs` compares a URL against the allowlist, but it is
