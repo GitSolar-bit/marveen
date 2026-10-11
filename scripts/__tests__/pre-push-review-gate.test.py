@@ -36,7 +36,7 @@ CLEAN_ENV.update({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMIT
 for _k in ("REVIEW_GATE_SKIP", "REVIEW_GATE_SKIP_REASON", "MARVEEN_API_BASE", "MARVEEN_WEB_PORT",
            "WEB_PORT", "MARVEEN_TOKEN_FILE", "REVIEW_GATE_INSTALL_ROOT", "REVIEW_GATE_REVIEWER", "REVIEW_GATE_TRACE_WORD"):
     CLEAN_ENV.pop(_k, None)
-# The gate applies to agent sessions only (Laci, 2026-10-11, 5b). The suite itself may run inside one,
+# The gate applies to agent sessions only (the owner's decision, 2026-10-11). The suite itself may run inside one,
 # so the agent markers are removed here and the agent case is put back explicitly in setUp.
 AGENT_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_EXECPATH")
 for _k in AGENT_MARKERS:
@@ -65,7 +65,7 @@ class Stub:
                 if stub.raw is not None:
                     body = stub.raw.encode()
                 else:
-                    who = q.get("agent", ["sam"])[0]
+                    who = q.get("agent", ["reviewer1"])[0]
                     rows = [r for r in stub.rows if r["from_agent"] == who or r["to_agent"] == who]
                     rows.sort(key=lambda r: -r["id"])
                     if "before" in q:
@@ -81,7 +81,7 @@ class Stub:
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self.next_id = 1
 
-    def add(self, content, frm="sam", to="igor", status="done"):
+    def add(self, content, frm="reviewer1", to="igor", status="done"):
         self.rows.append({"id": self.next_id, "from_agent": frm, "to_agent": to, "content": content, "status": status})
         self.next_id += 1
 
@@ -138,10 +138,10 @@ class ReviewGate(unittest.TestCase):
         sh("git", "fetch", "-q", "origin", cwd=self.repo)
         sh("git", "fetch", "-q", "fork", cwd=self.repo)
         sh("bash", os.path.join(self.repo, "scripts", "install-review-gate-hook.sh"), cwd=self.repo)
-        # self.env is an AGENT push (CLAUDECODE set); self.laci_env is a hand push (no marker).
-        self.laci_env = dict(CLEAN_ENV, MARVEEN_API_BASE="http://127.0.0.1:%d" % self.stub.port,
-                             REVIEW_GATE_REVIEWER="sam", REVIEW_GATE_TRACE_WORD="SAM-ZOLD")
-        self.env = dict(self.laci_env, CLAUDECODE="1")
+        # self.env is an AGENT push (CLAUDECODE set); self.hand_env is a hand push (no marker).
+        self.hand_env = dict(CLEAN_ENV, MARVEEN_API_BASE="http://127.0.0.1:%d" % self.stub.port,
+                             REVIEW_GATE_REVIEWER="reviewer1", REVIEW_GATE_TRACE_WORD="CUSTOM-GREEN")
+        self.env = dict(self.hand_env, CLAUDECODE="1")
         sh("git", "checkout", "-q", "-b", "feature", cwd=self.repo)
 
     def commit(self, msg):
@@ -167,33 +167,33 @@ class ReviewGate(unittest.TestCase):
         h = self.commit("a")
         p = self.push("fork", "feature")
         self.assertNotEqual(p.returncode, 0, p.stderr)
-        self.assertIn("has no green trace from sam", p.stderr)
-        self.assertIn("SAM-ZOLD " + h[:8], p.stderr)
+        self.assertIn("has no green trace from reviewer1", p.stderr)
+        self.assertIn("CUSTOM-GREEN " + h[:8], p.stderr)
 
     def test_trace_for_the_head_passes(self):
         h = self.commit("a")
-        self.stub.add("Atnezve, rendben.\nSAM-ZOLD %s\nKartya: x" % h[:8])
+        self.stub.add("Reviewed, fine.\nCUSTOM-GREEN %s\nCard: x" % h[:8])
         p = self.push("fork", "feature")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn(h, sh("git", "ls-remote", self.bare, "refs/heads/feature").stdout)
 
     def test_full_40_digit_hash_and_uppercase_pass(self):
         h = self.commit("a")
-        self.stub.add("SAM-ZOLD %s" % h.upper())
+        self.stub.add("CUSTOM-GREEN %s" % h.upper())
         self.assertEqual(self.push("fork", "feature").returncode, 0)
 
     def test_green_for_the_old_head_does_not_cover_an_amended_head(self):
         old = self.commit("a")
-        self.stub.add("SAM-ZOLD %s" % old[:8])
+        self.stub.add("CUSTOM-GREEN %s" % old[:8])
         self.assertEqual(self.push("fork", "feature").returncode, 0)
         sh("git", "commit", "-q", "--amend", "-m", "a (amended)", cwd=self.repo)
         p = self.push("--force", "fork", "feature")
         self.assertNotEqual(p.returncode, 0, "a force-push of a NEW head must need a NEW green")
-        self.assertIn("has no green trace from sam", p.stderr)
+        self.assertIn("has no green trace from reviewer1", p.stderr)
 
     def test_a_further_commit_on_the_pr_branch_needs_its_own_green(self):
         first = self.commit("a")
-        self.stub.add("SAM-ZOLD %s" % first[:8])
+        self.stub.add("CUSTOM-GREEN %s" % first[:8])
         self.assertEqual(self.push("fork", "feature").returncode, 0)
         self.commit("b")
         p = self.push("fork", "feature")
@@ -202,13 +202,13 @@ class ReviewGate(unittest.TestCase):
     def test_lookalikes_do_not_count(self):
         h = self.commit("a")
         for text in (
-            "SAM-ZOLD %s NEM" % h[:8],                      # text after the hash
-            "SAM-ZOLD %s." % h[:8],                         # trailing punctuation
-            "Ha zold lenne: SAM-ZOLD %s" % h[:8],           # not a line of its own
-            "`SAM-ZOLD %s`" % h[:8],                        # wrapped
-            "SAM-ZOLD %s" % h[:7],                          # prefix too short
-            "SAM-NEM %s" % h[:8],                           # a refusal
-            "SAM-ZOLD deadbeef",                            # another commit
+            "CUSTOM-GREEN %s NOT" % h[:8],                      # text after the hash
+            "CUSTOM-GREEN %s." % h[:8],                         # trailing punctuation
+            "If it were green: CUSTOM-GREEN %s" % h[:8],           # not a line of its own
+            "`CUSTOM-GREEN %s`" % h[:8],                        # wrapped
+            "CUSTOM-GREEN %s" % h[:7],                          # prefix too short
+            "CUSTOM-RED %s" % h[:8],                           # a refusal
+            "CUSTOM-GREEN deadbeef",                            # another commit
         ):
             self.stub.rows.clear()
             self.stub.add(text)
@@ -217,13 +217,13 @@ class ReviewGate(unittest.TestCase):
 
     def test_a_row_from_another_sender_or_a_failed_row_does_not_count(self):
         h = self.commit("a")
-        self.stub.add("SAM-ZOLD %s" % h[:8], frm="hex", to="sam")
-        self.stub.add("SAM-ZOLD %s" % h[:8], frm="sam", status="failed")
+        self.stub.add("CUSTOM-GREEN %s" % h[:8], frm="other-agent", to="reviewer1")
+        self.stub.add("CUSTOM-GREEN %s" % h[:8], frm="reviewer1", status="failed")
         self.assertNotEqual(self.push("--dry-run", "fork", "feature").returncode, 0)
 
     def test_the_token_is_sent_and_never_printed(self):
         h = self.commit("a")
-        self.stub.add("SAM-ZOLD %s" % h[:8])
+        self.stub.add("CUSTOM-GREEN %s" % h[:8])
         p = self.push("fork", "feature")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("Bearer test-token", self.stub.token_seen)
@@ -231,7 +231,7 @@ class ReviewGate(unittest.TestCase):
 
     def test_a_green_older_than_one_page_is_found(self):
         h = self.commit("a")
-        self.stub.add("SAM-ZOLD %s" % h[:8])
+        self.stub.add("CUSTOM-GREEN %s" % h[:8])
         for i in range(250):
             self.stub.add("chatter %d" % i)
         p = self.push("fork", "feature")
@@ -245,14 +245,14 @@ class ReviewGate(unittest.TestCase):
         env = dict(self.env, MARVEEN_API_BASE="http://127.0.0.1:1")
         p = self.push("fork", "feature", env=env)
         self.assertNotEqual(p.returncode, 0)
-        self.assertIn("cannot read sam's messages", p.stderr)
+        self.assertIn("cannot read reviewer1's messages", p.stderr)
 
     def test_missing_token_blocks(self):
         self.commit("a")
         os.remove(os.path.join(self.repo, "store", ".dashboard-token"))
         p = self.push("fork", "feature")
         self.assertNotEqual(p.returncode, 0)
-        self.assertIn("cannot read sam's messages", p.stderr)
+        self.assertIn("cannot read reviewer1's messages", p.stderr)
 
     def test_a_malformed_answer_blocks(self):
         self.commit("a")
@@ -262,7 +262,7 @@ class ReviewGate(unittest.TestCase):
         finally:
             self.stub.raw = None
         self.assertNotEqual(p.returncode, 0)
-        self.assertIn("cannot read sam's messages", p.stderr)
+        self.assertIn("cannot read reviewer1's messages", p.stderr)
 
     def test_python_missing_from_the_hook_means_the_push_is_blocked_not_skipped(self):
         # the dispatcher turns a hook that cannot start into a failed push: shebang to nowhere
@@ -278,7 +278,7 @@ class ReviewGate(unittest.TestCase):
 
     def test_branch_deletion_needs_no_trace_and_no_request(self):
         self.commit("a")
-        self.stub.add("SAM-ZOLD %s" % self.head()[:8])
+        self.stub.add("CUSTOM-GREEN %s" % self.head()[:8])
         self.assertEqual(self.push("fork", "feature").returncode, 0)
         self.stub.rows.clear()
         self.stub.requests.clear()
@@ -314,7 +314,7 @@ class ReviewGate(unittest.TestCase):
     def test_a_hand_push_without_agent_markers_passes_with_no_trace_and_no_request(self):
         self.commit("a")
         for remote in ("fork", "origin"):
-            p = self.push(remote, "feature", env=self.laci_env)
+            p = self.push(remote, "feature", env=self.hand_env)
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertIn("not a Claude Code agent session", p.stderr)
         self.assertEqual(self.stub.requests, [], "a non-agent push must not even ask the dashboard")
@@ -323,19 +323,19 @@ class ReviewGate(unittest.TestCase):
         for marker in AGENT_MARKERS:
             with self.subTest(marker=marker):
                 self.commit("m-" + marker)
-                p = self.push("fork", "feature", env=dict(self.laci_env, **{marker: "1"}))
+                p = self.push("fork", "feature", env=dict(self.hand_env, **{marker: "1"}))
                 self.assertNotEqual(p.returncode, 0, p.stderr)
-                self.assertIn("has no green trace from sam", p.stderr)
+                self.assertIn("has no green trace from reviewer1", p.stderr)
 
     def test_an_empty_marker_does_not_make_the_push_an_agent_push(self):
         self.commit("a")
-        p = self.push("fork", "feature", env=dict(self.laci_env, CLAUDECODE=""))
+        p = self.push("fork", "feature", env=dict(self.hand_env, CLAUDECODE=""))
         self.assertEqual(p.returncode, 0, p.stderr)
 
     def test_config_dir_alone_is_not_a_marker(self):
         # CLAUDE_CONFIG_DIR can be exported in a plain terminal to run `claude`; it must not gate a hand push.
         self.commit("a")
-        p = self.push("fork", "feature", env=dict(self.laci_env, CLAUDE_CONFIG_DIR="/tmp/x"))
+        p = self.push("fork", "feature", env=dict(self.hand_env, CLAUDE_CONFIG_DIR="/tmp/x"))
         self.assertEqual(p.returncode, 0, p.stderr)
 
     def test_documented_limit_an_agent_that_unsets_the_markers_walks_through(self):
@@ -347,7 +347,7 @@ class ReviewGate(unittest.TestCase):
 
     def test_a_green_agent_push_still_passes(self):
         h = self.commit("a")
-        self.stub.add("SAM-ZOLD %s" % h[:12])
+        self.stub.add("CUSTOM-GREEN %s" % h[:12])
         p = self.push("fork", "feature")
         self.assertEqual(p.returncode, 0, p.stderr)
 
@@ -368,25 +368,25 @@ class ReviewGate(unittest.TestCase):
     def test_reviewer_and_word_can_come_from_the_install_dotenv(self):
         h = self.commit("a")
         with open(os.path.join(self.repo, ".env"), "w") as fh:
-            fh.write("REVIEW_GATE_REVIEWER=sam\nREVIEW_GATE_TRACE_WORD='SAM-ZOLD'\n")
+            fh.write("REVIEW_GATE_REVIEWER=reviewer1\nREVIEW_GATE_TRACE_WORD='CUSTOM-GREEN'\n")
         env = self.env_without("REVIEW_GATE_REVIEWER", "REVIEW_GATE_TRACE_WORD")
         p = self.push("fork", "feature", env=env)
         self.assertNotEqual(p.returncode, 0, p.stderr)
-        self.assertIn("has no green trace from sam", p.stderr)
-        self.stub.add("SAM-ZOLD " + h[:12])
+        self.assertIn("has no green trace from reviewer1", p.stderr)
+        self.stub.add("CUSTOM-GREEN " + h[:12])
         p = self.push("fork", "feature", env=env)
         self.assertEqual(p.returncode, 0, p.stderr)
 
     def test_another_reviewer_and_the_default_word_and_no_name_in_the_texts(self):
         h = self.commit("a")
         env = dict(self.env_without("REVIEW_GATE_TRACE_WORD"), REVIEW_GATE_REVIEWER="reviewer2")
-        self.stub.add("SAM-ZOLD " + h[:12], frm="reviewer2")  # right sender, wrong word
+        self.stub.add("CUSTOM-GREEN " + h[:12], frm="reviewer2")  # right sender, wrong word
         p = self.push("fork", "feature", env=env)
         self.assertNotEqual(p.returncode, 0, p.stderr)
         self.assertIn("REVIEW-GREEN " + h[:8], p.stderr)
-        for name in ("Sam", "Laci", "SAM-ZOLD"):
+        for name in ("Sam", "Laci", "CUSTOM-GREEN"):
             self.assertNotIn(name, p.stderr)
-        self.stub.add("REVIEW-GREEN " + h[:12], frm="sam")  # right word, wrong sender
+        self.stub.add("REVIEW-GREEN " + h[:12], frm="reviewer1")  # right word, wrong sender
         self.assertNotEqual(self.push("fork", "feature", env=env).returncode, 0)
         self.stub.add("REVIEW-GREEN " + h[:12], frm="reviewer2")
         p = self.push("fork", "feature", env=env)
@@ -395,7 +395,7 @@ class ReviewGate(unittest.TestCase):
 
     def test_a_misconfigured_reviewer_or_word_blocks(self):
         self.commit("a")
-        for key, val in (("REVIEW_GATE_REVIEWER", "sam&x=1"), ("REVIEW_GATE_TRACE_WORD", "a b")):
+        for key, val in (("REVIEW_GATE_REVIEWER", "reviewer1&x=1"), ("REVIEW_GATE_TRACE_WORD", "a b")):
             with self.subTest(key=key):
                 p = self.push("fork", "feature", env=dict(self.env, **{key: val}))
                 self.assertNotEqual(p.returncode, 0, p.stderr)
@@ -407,20 +407,22 @@ class ReviewGate(unittest.TestCase):
         env = self.env_without("REVIEW_GATE_REVIEWER", "REVIEW_GATE_TRACE_WORD")
         dotenv = os.path.join(self.repo, ".env")
         cases = {
-            "export prefix": "export REVIEW_GATE_REVIEWER=sam\nexport REVIEW_GATE_TRACE_WORD=SAM-ZOLD\n",
-            "export + quotes + spaces": "  export  REVIEW_GATE_REVIEWER = \"sam\"  \n# c\nREVIEW_GATE_TRACE_WORD='SAM-ZOLD'\n",
-            "last occurrence wins": "REVIEW_GATE_REVIEWER=other\nREVIEW_GATE_REVIEWER=sam\nREVIEW_GATE_TRACE_WORD=SAM-ZOLD\n",
+            "export prefix": "export REVIEW_GATE_REVIEWER=reviewer1\nexport REVIEW_GATE_TRACE_WORD=CUSTOM-GREEN\n",
+            "export + quotes + spaces": "  export  REVIEW_GATE_REVIEWER = \"reviewer1\"  \n# c\nREVIEW_GATE_TRACE_WORD='CUSTOM-GREEN'\n",
+            "BOM on the first line": "\ufeffREVIEW_GATE_REVIEWER=reviewer1\nREVIEW_GATE_TRACE_WORD=CUSTOM-GREEN\n",
+            "BOM + export": "\ufeffexport REVIEW_GATE_REVIEWER=reviewer1\nREVIEW_GATE_TRACE_WORD=CUSTOM-GREEN\n",
+            "last occurrence wins": "REVIEW_GATE_REVIEWER=other\nREVIEW_GATE_REVIEWER=reviewer1\nREVIEW_GATE_TRACE_WORD=CUSTOM-GREEN\n",
         }
         for label, body in cases.items():
             with self.subTest(case=label):
-                with open(dotenv, "w") as fh:
+                with open(dotenv, "w", encoding="utf-8", newline="") as fh:
                     fh.write(body)
                 p = self.push("fork", "feature", env=env)
                 self.assertNotEqual(p.returncode, 0, "the gate must be ACTIVE for %r: %s" % (label, p.stderr))
-                self.assertIn("has no green trace from sam", p.stderr)
+                self.assertIn("has no green trace from reviewer1", p.stderr)
         # a commented-out line is NOT a setting
         with open(dotenv, "w") as fh:
-            fh.write("# REVIEW_GATE_REVIEWER=sam\n")
+            fh.write("# REVIEW_GATE_REVIEWER=reviewer1\n")
         p = self.push("fork", "feature", env=env)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("INACTIVE", p.stderr)
@@ -486,7 +488,7 @@ class ReviewGate(unittest.TestCase):
 
     def test_odd_answer_shapes_block_with_the_gates_message_not_a_traceback(self):
         self.commit("a")
-        for raw in ('["x", 1]', '[{"id":1,"from_agent":"sam","status":"done","content":5}]'):
+        for raw in ('["x", 1]', '[{"id":1,"from_agent":"reviewer1","status":"done","content":5}]'):
             with self.subTest(raw=raw):
                 self.stub.raw = raw
                 try:
@@ -494,7 +496,7 @@ class ReviewGate(unittest.TestCase):
                 finally:
                     self.stub.raw = None
                 self.assertNotEqual(p.returncode, 0, p.stderr)
-                self.assertIn("cannot read sam's messages", p.stderr)
+                self.assertIn("cannot read reviewer1's messages", p.stderr)
                 self.assertNotIn("Traceback", p.stderr)
 
     # ---- the bypass ------------------------------------------------------------------------

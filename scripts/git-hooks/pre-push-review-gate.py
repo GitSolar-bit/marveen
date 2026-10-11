@@ -125,10 +125,11 @@ def cfg(name):
         return val
     found = ""
     try:
-        text = (INSTALL / ".env").read_text()
+        # utf-8-sig: a leading BOM (a Windows editor) would otherwise glue itself to line 1 and hide the first setting
+        text = (INSTALL / ".env").read_text(encoding="utf-8-sig")
     except OSError:
         return ""
-    # Parsed like the product's own .env reader (src/env-parse.ts): trimmed lines, "#" comments, the
+    # Parsed like the product's own .env reader (src/env-parse.ts): BOM dropped, trimmed lines, "#" comments, the
     # first "=" splits, one pair of matching quotes is stripped, the LAST occurrence wins. One addition:
     # a leading `export ` is accepted. Without it an `export NAME=value` line (a normal shell habit) would
     # read as "not set", and a gate that reads as not set is a gate that is silently off.
@@ -231,13 +232,13 @@ def main():
 
     if not agent_session():
         sys.stderr.write("pre-push: not a Claude Code agent session (none of %s is set) -- the reviewer-green "
-                         "trace is NOT checked (card ee1a22f1).\n" % ", ".join(AGENT_MARKERS))
+                         "trace is NOT checked.\n" % ", ".join(AGENT_MARKERS))
         return 0
 
     reviewer = cfg("REVIEW_GATE_REVIEWER")
     if not reviewer:
         sys.stderr.write("pre-push: reviewer-green gate INACTIVE (REVIEW_GATE_REVIEWER is not set in the environment "
-                         "or in %s) -- nothing is checked (card ee1a22f1).\n" % (INSTALL / ".env"))
+                         "or in %s) -- nothing is checked.\n" % (INSTALL / ".env"))
         return 0
     word = cfg("REVIEW_GATE_TRACE_WORD") or DEFAULT_TRACE_WORD
     if not REVIEWER_RE.match(reviewer) or not TRACE_WORD_RE.match(word):

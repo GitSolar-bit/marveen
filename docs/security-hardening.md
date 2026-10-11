@@ -51,8 +51,8 @@ The `.env` lines are read the way the product's own reader does (trimmed, `#` co
 of quotes stripped, the last occurrence wins), and a leading `export ` is accepted too: a gate
 that reads `export NAME=value` as "not set" would be silently off. A reviewer id or trace word
 with characters outside letters, digits, `-` and `_` blocks the push (a gate that is
-misconfigured fails closed). The originating install sets
-`REVIEW_GATE_REVIEWER=sam` and `REVIEW_GATE_TRACE_WORD=SAM-ZOLD`.
+misconfigured fails closed). For example:
+`REVIEW_GATE_REVIEWER=<your reviewer agent>` and `REVIEW_GATE_TRACE_WORD=<your trace word>`.
 
 **It gates agent sessions only** (the owner's decision, 2026-10-11): a push that does not come
 from a Claude Code session goes through without a trace, with one line on stderr, so the
