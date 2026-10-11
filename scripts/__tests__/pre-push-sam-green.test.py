@@ -34,7 +34,7 @@ CLEAN_ENV = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 CLEAN_ENV.update({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
                   "GIT_COMMITTER_EMAIL": "t@t"})
 for _k in ("SKIP_SAM_GREEN_GATE", "SAM_GREEN_SKIP_REASON", "MARVEEN_API_BASE", "MARVEEN_WEB_PORT",
-           "WEB_PORT", "MARVEEN_TOKEN_FILE", "SAM_GREEN_INSTALL_ROOT"):
+           "WEB_PORT", "MARVEEN_TOKEN_FILE", "SAM_GREEN_INSTALL_ROOT", "SAM_GREEN_REVIEWER", "SAM_GREEN_TRACE_WORD"):
     CLEAN_ENV.pop(_k, None)
 # The gate applies to agent sessions only (Laci, 2026-10-11, 5b). The suite itself may run inside one,
 # so the agent markers are removed here and the agent case is put back explicitly in setUp.
@@ -65,7 +65,8 @@ class Stub:
                 if stub.raw is not None:
                     body = stub.raw.encode()
                 else:
-                    rows = [r for r in stub.rows if r["from_agent"] == "sam" or r["to_agent"] == "sam"]
+                    who = q.get("agent", ["sam"])[0]
+                    rows = [r for r in stub.rows if r["from_agent"] == who or r["to_agent"] == who]
                     rows.sort(key=lambda r: -r["id"])
                     if "before" in q:
                         rows = [r for r in rows if r["id"] < int(q["before"][0])]
@@ -138,7 +139,8 @@ class SamGreen(unittest.TestCase):
         sh("git", "fetch", "-q", "fork", cwd=self.repo)
         sh("bash", os.path.join(self.repo, "scripts", "install-sam-green-gate-hook.sh"), cwd=self.repo)
         # self.env is an AGENT push (CLAUDECODE set); self.laci_env is a hand push (no marker).
-        self.laci_env = dict(CLEAN_ENV, MARVEEN_API_BASE="http://127.0.0.1:%d" % self.stub.port)
+        self.laci_env = dict(CLEAN_ENV, MARVEEN_API_BASE="http://127.0.0.1:%d" % self.stub.port,
+                             SAM_GREEN_REVIEWER="sam", SAM_GREEN_TRACE_WORD="SAM-ZOLD")
         self.env = dict(self.laci_env, CLAUDECODE="1")
         sh("git", "checkout", "-q", "-b", "feature", cwd=self.repo)
 
@@ -165,7 +167,7 @@ class SamGreen(unittest.TestCase):
         h = self.commit("a")
         p = self.push("fork", "feature")
         self.assertNotEqual(p.returncode, 0, p.stderr)
-        self.assertIn("no Sam-green trace", p.stderr)
+        self.assertIn("has no green trace from sam", p.stderr)
         self.assertIn("SAM-ZOLD " + h[:8], p.stderr)
 
     def test_trace_for_the_head_passes(self):
@@ -187,7 +189,7 @@ class SamGreen(unittest.TestCase):
         sh("git", "commit", "-q", "--amend", "-m", "a (amended)", cwd=self.repo)
         p = self.push("--force", "fork", "feature")
         self.assertNotEqual(p.returncode, 0, "a force-push of a NEW head must need a NEW green")
-        self.assertIn("no Sam-green trace", p.stderr)
+        self.assertIn("has no green trace from sam", p.stderr)
 
     def test_a_further_commit_on_the_pr_branch_needs_its_own_green(self):
         first = self.commit("a")
@@ -243,14 +245,14 @@ class SamGreen(unittest.TestCase):
         env = dict(self.env, MARVEEN_API_BASE="http://127.0.0.1:1")
         p = self.push("fork", "feature", env=env)
         self.assertNotEqual(p.returncode, 0)
-        self.assertIn("cannot read Sam's messages", p.stderr)
+        self.assertIn("cannot read sam's messages", p.stderr)
 
     def test_missing_token_blocks(self):
         self.commit("a")
         os.remove(os.path.join(self.repo, "store", ".dashboard-token"))
         p = self.push("fork", "feature")
         self.assertNotEqual(p.returncode, 0)
-        self.assertIn("cannot read Sam's messages", p.stderr)
+        self.assertIn("cannot read sam's messages", p.stderr)
 
     def test_a_malformed_answer_blocks(self):
         self.commit("a")
@@ -260,7 +262,7 @@ class SamGreen(unittest.TestCase):
         finally:
             self.stub.raw = None
         self.assertNotEqual(p.returncode, 0)
-        self.assertIn("cannot read Sam's messages", p.stderr)
+        self.assertIn("cannot read sam's messages", p.stderr)
 
     def test_python_missing_from_the_hook_means_the_push_is_blocked_not_skipped(self):
         # the dispatcher turns a hook that cannot start into a failed push: shebang to nowhere
@@ -323,7 +325,7 @@ class SamGreen(unittest.TestCase):
                 self.commit("m-" + marker)
                 p = self.push("fork", "feature", env=dict(self.laci_env, **{marker: "1"}))
                 self.assertNotEqual(p.returncode, 0, p.stderr)
-                self.assertIn("no Sam-green trace", p.stderr)
+                self.assertIn("has no green trace from sam", p.stderr)
 
     def test_an_empty_marker_does_not_make_the_push_an_agent_push(self):
         self.commit("a")
@@ -349,6 +351,114 @@ class SamGreen(unittest.TestCase):
         p = self.push("fork", "feature")
         self.assertEqual(p.returncode, 0, p.stderr)
 
+    # ---- opt-in and configurable (upstream review of #1888, finding 1) -----------------------
+
+    def env_without(self, *names):
+        return {k: v for k, v in self.env.items() if k not in names}
+
+    def test_an_unset_reviewer_means_the_gate_is_inactive(self):
+        self.commit("a")
+        env = self.env_without("SAM_GREEN_REVIEWER", "SAM_GREEN_TRACE_WORD")
+        for remote in ("fork", "origin"):
+            p = self.push(remote, "feature", env=env)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertIn("INACTIVE", p.stderr)
+        self.assertEqual(self.stub.requests, [], "an inactive gate must not even ask the dashboard")
+
+    def test_reviewer_and_word_can_come_from_the_install_dotenv(self):
+        h = self.commit("a")
+        with open(os.path.join(self.repo, ".env"), "w") as fh:
+            fh.write("SAM_GREEN_REVIEWER=sam\nSAM_GREEN_TRACE_WORD='SAM-ZOLD'\n")
+        env = self.env_without("SAM_GREEN_REVIEWER", "SAM_GREEN_TRACE_WORD")
+        p = self.push("fork", "feature", env=env)
+        self.assertNotEqual(p.returncode, 0, p.stderr)
+        self.assertIn("has no green trace from sam", p.stderr)
+        self.stub.add("SAM-ZOLD " + h[:12])
+        p = self.push("fork", "feature", env=env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+
+    def test_another_reviewer_and_the_default_word_and_no_name_in_the_texts(self):
+        h = self.commit("a")
+        env = dict(self.env_without("SAM_GREEN_TRACE_WORD"), SAM_GREEN_REVIEWER="reviewer2")
+        self.stub.add("SAM-ZOLD " + h[:12], frm="reviewer2")  # right sender, wrong word
+        p = self.push("fork", "feature", env=env)
+        self.assertNotEqual(p.returncode, 0, p.stderr)
+        self.assertIn("REVIEW-GREEN " + h[:8], p.stderr)
+        for name in ("Sam", "Laci", "SAM-ZOLD"):
+            self.assertNotIn(name, p.stderr)
+        self.stub.add("REVIEW-GREEN " + h[:12], frm="sam")  # right word, wrong sender
+        self.assertNotEqual(self.push("fork", "feature", env=env).returncode, 0)
+        self.stub.add("REVIEW-GREEN " + h[:12], frm="reviewer2")
+        p = self.push("fork", "feature", env=env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(any("agent=reviewer2" in r for r in self.stub.requests), self.stub.requests)
+
+    def test_a_misconfigured_reviewer_or_word_blocks(self):
+        self.commit("a")
+        for key, val in (("SAM_GREEN_REVIEWER", "sam&x=1"), ("SAM_GREEN_TRACE_WORD", "a b")):
+            with self.subTest(key=key):
+                p = self.push("fork", "feature", env=dict(self.env, **{key: val}))
+                self.assertNotEqual(p.returncode, 0, p.stderr)
+                self.assertIn("misconfigured", p.stderr)
+        self.assertEqual(self.stub.requests, [])
+
+    # ---- the installer (upstream review of #1888, finding 2) -------------------------------
+
+    def installer(self):
+        return os.path.join(self.repo, "scripts", "install-sam-green-gate-hook.sh")
+
+    def test_the_installer_refuses_loudly_when_core_hooks_path_points_elsewhere(self):
+        os.makedirs(os.path.join(self.repo, ".githooks"))
+        sh("git", "config", "core.hooksPath", ".githooks", cwd=self.repo)
+        p = sh("bash", self.installer(), cwd=self.repo, check=False)
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("would enforce NOTHING", p.stderr)
+        self.assertNotIn("installed", p.stdout)
+
+    def test_the_installer_accepts_core_hooks_path_equal_to_the_hook_dir(self):
+        sh("git", "config", "core.hooksPath", os.path.join(self.repo, ".git", "hooks"), cwd=self.repo)
+        p = sh("bash", self.installer(), cwd=self.repo, check=False)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("INACTIVE until SAM_GREEN_REVIEWER", p.stdout)
+
+    # ---- fail-closed branches that were reachable but unpinned (finding 3) ------------------
+
+    def test_a_ref_that_does_not_resolve_to_a_commit_blocks(self):
+        self.commit("a")
+        blob = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=self.repo, env=CLEAN_ENV, input="x\n",
+                              capture_output=True, text=True, check=True).stdout.strip()
+        p = self.push("fork", blob + ":refs/tags/x")
+        self.assertNotEqual(p.returncode, 0, p.stderr)
+        self.assertIn("does not resolve to a commit", p.stderr)
+
+    def test_a_failing_rev_list_blocks(self):
+        # A stub `git` on PATH does not reach the hook (git puts its own exec path first for hooks), so the
+        # failure is made real: the base commit's object is moved away and the hook's rev-list cannot walk to it.
+        # The hook is run DIRECTLY and its own exit status is asserted: through `git push` the push would fail
+        # anyway on the missing object, so a push result cannot tell a blocking hook from a passing one.
+        head = self.commit("a")
+        base = sh("git", "rev-parse", "develop", cwd=self.repo).stdout.strip()
+        obj = os.path.join(self.repo, ".git", "objects", base[:2], base[2:])
+        self.assertTrue(os.path.exists(obj), "the base commit must be a loose object for this case")
+        os.rename(obj, obj + ".moved-away")
+        p = subprocess.run([self.hook_path(), "fork", self.bare], cwd=self.repo, env=self.env, capture_output=True,
+                           text=True, input="refs/heads/feature %s refs/heads/feature %s\n" % (head, "0" * 40))
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertIn("git rev-list failed", p.stderr)
+
+    def test_odd_answer_shapes_block_with_the_gates_message_not_a_traceback(self):
+        self.commit("a")
+        for raw in ('["x", 1]', '[{"id":1,"from_agent":"sam","status":"done","content":5}]'):
+            with self.subTest(raw=raw):
+                self.stub.raw = raw
+                try:
+                    p = self.push("fork", "feature")
+                finally:
+                    self.stub.raw = None
+                self.assertNotEqual(p.returncode, 0, p.stderr)
+                self.assertIn("cannot read sam's messages", p.stderr)
+                self.assertNotIn("Traceback", p.stderr)
+
     # ---- the bypass ------------------------------------------------------------------------
 
     def test_skip_without_a_reason_is_refused(self):
@@ -359,19 +469,19 @@ class SamGreen(unittest.TestCase):
 
     def test_skip_with_a_reason_passes_and_is_recorded(self):
         h = self.commit("a")
-        env = dict(self.env, SKIP_SAM_GREEN_GATE="1", SAM_GREEN_SKIP_REASON="Laci TG 9999: emergency hotfix")
+        env = dict(self.env, SKIP_SAM_GREEN_GATE="1", SAM_GREEN_SKIP_REASON="owner msg 9999: emergency hotfix")
         p = self.push("fork", "feature", env=env)
         self.assertEqual(p.returncode, 0, p.stderr)
         with open(os.path.join(self.repo, "store", "push-samgreen-skips.log")) as fh:
             log = fh.read()
-        self.assertIn("Laci TG 9999: emergency hotfix", log)
+        self.assertIn("owner msg 9999: emergency hotfix", log)
         self.assertIn(h, log)
         self.assertEqual(self.stub.requests, [], "a skip must not even ask the dashboard")
 
     def test_a_skip_that_cannot_be_recorded_is_refused(self):
         self.commit("a")
         os.symlink("/nonexistent-dir/x.log", os.path.join(self.repo, "store", "push-samgreen-skips.log"))
-        env = dict(self.env, SKIP_SAM_GREEN_GATE="1", SAM_GREEN_SKIP_REASON="Laci TG 9999: emergency hotfix")
+        env = dict(self.env, SKIP_SAM_GREEN_GATE="1", SAM_GREEN_SKIP_REASON="owner msg 9999: emergency hotfix")
         p = self.push("fork", "feature", env=env)
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("unrecorded skip is refused", p.stderr)

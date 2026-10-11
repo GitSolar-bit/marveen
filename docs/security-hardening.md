@@ -27,18 +27,33 @@ Override an intentional rewrite of a protected branch:
 ALLOW_FORCE_PUSH=1 git push ...
 ```
 
-# Outgoing code needs a Sam-green trace (pre-push)
+# Outgoing code needs a reviewer-green trace (pre-push)
 
-Laci's rule (2026-09-30): code that goes outward (a push, a force-push, an update of a PR
-branch) goes only after Sam's approval; a green test is not enough. The rule used to live in
-two CLAUDE.md files and nothing enforced it.
+The owner's rule: code that goes outward (a push, a force-push, an update of a PR branch) goes
+only after the reviewer agent's approval; a green test is not enough. The rule used to live in
+instruction files and nothing enforced it.
 
 `scripts/install-sam-green-gate-hook.sh` (run by `scripts/sync-hooks.sh`, like the other
 installers) copies `scripts/git-hooks/pre-push-sam-green.py` into
-`.git/hooks/pre-push.d/30-sam-green-gate`. The hook is repo-level, but it gates **agent
-sessions only** (Laci's decision, 2026-10-11, Telegram 4034): a push that does not come from a
-Claude Code session goes through without a trace, with one line on stderr, so Laci's own hand
-push is free.
+`.git/hooks/pre-push.d/30-sam-green-gate`.
+
+**It is opt-in.** The hook is installed on every install, but it does nothing (every push
+passes, one stderr line says so) until a reviewer agent is configured. Without that, an install
+that has no such agent would have every agent push stopped for good. Set, in the environment of
+the push or as a line in `<install>/.env`:
+
+```
+SAM_GREEN_REVIEWER=<agent id of the reviewer>      # unset = gate inactive
+SAM_GREEN_TRACE_WORD=<word that starts the trace>  # optional, default REVIEW-GREEN
+```
+
+A reviewer id or trace word with characters outside letters, digits, `-` and `_` blocks the
+push (a gate that is misconfigured fails closed). The originating install sets
+`SAM_GREEN_REVIEWER=sam` and `SAM_GREEN_TRACE_WORD=SAM-ZOLD`.
+
+**It gates agent sessions only** (the owner's decision, 2026-10-11): a push that does not come
+from a Claude Code session goes through without a trace, with one line on stderr, so the
+owner's own hand push is free.
 
 **Who counts as an agent.** At least one of `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`,
 `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_EXECPATH` is set and non-empty in the environment of the
@@ -51,33 +66,42 @@ in both directions:
 - An agent that unsets the markers (`env -u CLAUDECODE ...`) or pushes from a process that is
   not a Claude Code child walks through, silently. Same class as `--no-verify`; pinned in the
   tests as a documented limit.
-- A push Laci types *inside* a Claude Code session (the `!` prefix) carries the markers, so it
-  is gated like an agent's. His way through is the logged skip below.
+- A push the owner types *inside* a Claude Code session (the `!` prefix) carries the markers, so
+  it is gated like an agent's. The way through is the logged skip below.
 
-**What counts as the trace.** A message in the fleet mailbox that is from `sam` (status not
-`failed`) and contains a line of its own, exactly:
+**What counts as the trace.** A message in the fleet mailbox that is from the reviewer agent
+(status not `failed`) and contains a line of its own, exactly:
 
 ```
-SAM-ZOLD <8 to 40 hex digits of the head commit>
+<TRACE WORD> <8 to 40 hex digits of the head commit>
 ```
 
 The hash binds the green to the commit being pushed, so an amend, a rebase or a further commit
 on the PR branch needs a new line. Text after the hash, a wrapped or inline mention, a prefix
 shorter than 8 digits and a row from another sender do not count. The gate reads
-`/api/messages?agent=sam` (up to 2000 of Sam's messages back) with the dashboard token.
+`/api/messages?agent=<reviewer>` (up to 2000 of the reviewer's messages back) with the dashboard
+token.
 
 **What needs no trace:** a deletion, and a push that sends no commit the destination lacks
 (already on the target remote's tracking refs; for a destination other than `origin`, also
-already on `origin`). Anything that cannot be verified (dashboard down, token unreadable, a ref
-that does not resolve) blocks.
+already on `origin`). Anything that cannot be verified (dashboard down, token unreadable, an
+answer of an unexpected shape, a ref that does not resolve, git failing) blocks.
 
 **What it is not.** It guards against *forgetting* the rule, not against a deliberate bypass:
 the trace is self-declared (one shared bearer token writes any `from_agent`), and
 `--no-verify` on the push skips every pre-push hook without leaving a line. Do not read a pass
-as proof that Sam reviewed the change.
+as proof that the reviewer reviewed the change.
 
-**The way through, only on Laci's explicit instruction for that push:** set
-`SKIP_SAM_GREEN_GATE=1` and `SAM_GREEN_SKIP_REASON="Laci TG <message id>: <why>"` in the
+**`core.hooksPath`.** If the repository's `core.hooksPath` points anywhere other than
+`.git/hooks`, git never runs this hook. The installer then refuses (non-zero exit, message on
+stderr, nothing installed) instead of printing a success line. `sync-hooks.sh` reports the
+non-zero exit and carries on.
+
+**Undo.** There is no uninstaller: remove `.git/hooks/pre-push.d/30-sam-green-gate`. Running the
+installer again puts it back.
+
+**The way through, only on the owner's explicit instruction for that push:** set
+`SKIP_SAM_GREEN_GATE=1` and `SAM_GREEN_SKIP_REASON="<owner message id>: <why>"` in the
 environment of the push command. The reason is mandatory and the call is appended to
 `store/push-samgreen-skips.log` (who, when, remote, refs, reason); if the line cannot be
 written the push is refused.
