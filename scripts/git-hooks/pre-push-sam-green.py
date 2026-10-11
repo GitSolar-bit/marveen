@@ -15,6 +15,24 @@ read from the code, stated here so nobody reads this as stronger than it is:
      hook, this one included, and leave no line anywhere.
   3. SKIP_SAM_GREEN_GATE=1 (below) is an override by design.
 
+WHO IT APPLIES TO (Laci's decision 2026-10-11, Telegram 4034, option 5b): AGENT sessions only. A
+push that does not come from a Claude Code session goes through without a trace, so Laci's own
+hand push is free. "Comes from an agent session" = at least one of the markers in AGENT_MARKERS
+is set and non-empty in the environment of the push. Claude Code sets them for every process its
+Bash tool starts, and git hands that environment on to the hook. Measured on this install
+(2026-10-11, from the agent's own shell): CLAUDECODE, CLAUDE_CODE_ENTRYPOINT,
+CLAUDE_CODE_SESSION_ID and CLAUDE_CODE_EXECPATH were all set.
+Limits, stated so nobody reads this as a boundary:
+  - It is a "who typed it" guess from the environment, not an identity. An agent that unsets the
+    markers (`env -u CLAUDECODE -u ... <the push>`) or pushes from a process that is not a Claude
+    Code child walks through, silently. Same class as `--no-verify`: the gate guards against
+    FORGETTING, not against a deliberate bypass.
+  - The opposite error is a push Laci types INSIDE a Claude Code session (the `!` prefix): the
+    markers are set, so it counts as an agent push and is gated. His way through is the logged
+    skip below.
+  - A non-agent pass leaves no trace anywhere except one stderr line.
+  - CLAUDE_CONFIG_DIR is NOT a marker: it can be exported in a plain terminal to run `claude`.
+
 WHAT COUNTS AS A TRACE (designed here, not by Sam, on purpose: Sam asked that he not define
 the criterion he is then measured by). A message in the fleet mailbox that
   - has from_agent == "sam" and a status other than "failed", and
@@ -60,6 +78,8 @@ from pathlib import Path
 
 ZERO = "0" * 40
 UPSTREAM = "origin"
+# Set by Claude Code for every process its Bash tool starts (see "WHO IT APPLIES TO").
+AGENT_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_EXECPATH")
 TRACE_RE = re.compile(r"^[ \t]*SAM-ZOLD[ \t]+([0-9a-fA-F]{8,40})[ \t]*$", re.MULTILINE)
 PAGE = 200
 MAX_PAGES = 10  # 2000 of Sam's messages back; a green older than that is asked for again
@@ -69,6 +89,10 @@ MIN_REASON = 8
 INSTALL = Path(os.environ.get("SAM_GREEN_INSTALL_ROOT") or Path(__file__).resolve().parents[3])
 STORE = INSTALL / "store"
 SKIPLOG = STORE / "push-samgreen-skips.log"
+
+
+def agent_session():
+    return any(os.environ.get(k) for k in AGENT_MARKERS)
 
 
 def git(*args):
@@ -164,6 +188,11 @@ def main():
     remote = sys.argv[1] if len(sys.argv) > 1 else ""
     url = sys.argv[2] if len(sys.argv) > 2 else ""
     payload = sys.stdin.read()
+
+    if not agent_session():
+        sys.stderr.write("pre-push: not a Claude Code agent session (none of %s is set) -- Sam-green is NOT "
+                         "checked (Laci's own push, card ee1a22f1).\n" % ", ".join(AGENT_MARKERS))
+        return 0
 
     if os.environ.get("SKIP_SAM_GREEN_GATE") == "1":
         reason = (os.environ.get("SAM_GREEN_SKIP_REASON") or "").strip()

@@ -36,6 +36,11 @@ CLEAN_ENV.update({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMIT
 for _k in ("SKIP_SAM_GREEN_GATE", "SAM_GREEN_SKIP_REASON", "MARVEEN_API_BASE", "MARVEEN_WEB_PORT",
            "WEB_PORT", "MARVEEN_TOKEN_FILE", "SAM_GREEN_INSTALL_ROOT"):
     CLEAN_ENV.pop(_k, None)
+# The gate applies to agent sessions only (Laci, 2026-10-11, 5b). The suite itself may run inside one,
+# so the agent markers are removed here and the agent case is put back explicitly in setUp.
+AGENT_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_EXECPATH")
+for _k in AGENT_MARKERS:
+    CLEAN_ENV.pop(_k, None)
 
 
 class Stub:
@@ -132,7 +137,9 @@ class SamGreen(unittest.TestCase):
         sh("git", "fetch", "-q", "origin", cwd=self.repo)
         sh("git", "fetch", "-q", "fork", cwd=self.repo)
         sh("bash", os.path.join(self.repo, "scripts", "install-sam-green-gate-hook.sh"), cwd=self.repo)
-        self.env = dict(CLEAN_ENV, MARVEEN_API_BASE="http://127.0.0.1:%d" % self.stub.port)
+        # self.env is an AGENT push (CLAUDECODE set); self.laci_env is a hand push (no marker).
+        self.laci_env = dict(CLEAN_ENV, MARVEEN_API_BASE="http://127.0.0.1:%d" % self.stub.port)
+        self.env = dict(self.laci_env, CLAUDECODE="1")
         sh("git", "checkout", "-q", "-b", "feature", cwd=self.repo)
 
     def commit(self, msg):
@@ -299,6 +306,48 @@ class SamGreen(unittest.TestCase):
         self.commit("ours")
         p = self.push("origin", "feature")
         self.assertNotEqual(p.returncode, 0)
+
+    # ---- who it applies to -----------------------------------------------------------------
+
+    def test_a_hand_push_without_agent_markers_passes_with_no_trace_and_no_request(self):
+        self.commit("a")
+        for remote in ("fork", "origin"):
+            p = self.push(remote, "feature", env=self.laci_env)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertIn("not a Claude Code agent session", p.stderr)
+        self.assertEqual(self.stub.requests, [], "a non-agent push must not even ask the dashboard")
+
+    def test_every_agent_marker_alone_makes_the_push_gated(self):
+        for marker in AGENT_MARKERS:
+            with self.subTest(marker=marker):
+                self.commit("m-" + marker)
+                p = self.push("fork", "feature", env=dict(self.laci_env, **{marker: "1"}))
+                self.assertNotEqual(p.returncode, 0, p.stderr)
+                self.assertIn("no Sam-green trace", p.stderr)
+
+    def test_an_empty_marker_does_not_make_the_push_an_agent_push(self):
+        self.commit("a")
+        p = self.push("fork", "feature", env=dict(self.laci_env, CLAUDECODE=""))
+        self.assertEqual(p.returncode, 0, p.stderr)
+
+    def test_config_dir_alone_is_not_a_marker(self):
+        # CLAUDE_CONFIG_DIR can be exported in a plain terminal to run `claude`; it must not gate a hand push.
+        self.commit("a")
+        p = self.push("fork", "feature", env=dict(self.laci_env, CLAUDE_CONFIG_DIR="/tmp/x"))
+        self.assertEqual(p.returncode, 0, p.stderr)
+
+    def test_documented_limit_an_agent_that_unsets_the_markers_walks_through(self):
+        # NOT a feature: pins the stated limit (a "who typed it" guess, not an identity). If this ever
+        # fails, update the docs too.
+        self.commit("a")
+        env = {k: v for k, v in self.env.items() if k not in AGENT_MARKERS}
+        self.assertEqual(self.push("fork", "feature", env=env).returncode, 0)
+
+    def test_a_green_agent_push_still_passes(self):
+        h = self.commit("a")
+        self.stub.add("SAM-ZOLD %s" % h[:12])
+        p = self.push("fork", "feature")
+        self.assertEqual(p.returncode, 0, p.stderr)
 
     # ---- the bypass ------------------------------------------------------------------------
 

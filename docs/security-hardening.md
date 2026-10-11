@@ -35,8 +35,24 @@ two CLAUDE.md files and nothing enforced it.
 
 `scripts/install-sam-green-gate-hook.sh` (run by `scripts/sync-hooks.sh`, like the other
 installers) copies `scripts/git-hooks/pre-push-sam-green.py` into
-`.git/hooks/pre-push.d/30-sam-green-gate`. It applies to every agent that pushes from this
-repository, since the hook is repo-level.
+`.git/hooks/pre-push.d/30-sam-green-gate`. The hook is repo-level, but it gates **agent
+sessions only** (Laci's decision, 2026-10-11, Telegram 4034): a push that does not come from a
+Claude Code session goes through without a trace, with one line on stderr, so Laci's own hand
+push is free.
+
+**Who counts as an agent.** At least one of `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`,
+`CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_EXECPATH` is set and non-empty in the environment of the
+push. Claude Code sets them for every process its Bash tool starts and git passes the
+environment on to the hook (measured from an agent's own shell, 2026-10-11).
+`CLAUDE_CONFIG_DIR` is deliberately not a marker: it can be exported in a plain terminal to run
+`claude`. This is a "who typed it" guess from the environment, **not an identity**, and it fails
+in both directions:
+
+- An agent that unsets the markers (`env -u CLAUDECODE ...`) or pushes from a process that is
+  not a Claude Code child walks through, silently. Same class as `--no-verify`; pinned in the
+  tests as a documented limit.
+- A push Laci types *inside* a Claude Code session (the `!` prefix) carries the markers, so it
+  is gated like an agent's. His way through is the logged skip below.
 
 **What counts as the trace.** A message in the fleet mailbox that is from `sam` (status not
 `failed`) and contains a line of its own, exactly:
