@@ -36,8 +36,9 @@ describe('scripts/__tests__ suites', () => {
 
   // it.for, not it.each: the case function gets the test context, and ctx.skip() makes the
   // outcome a SKIPPED test that the reporter counts and shows. An early `return` from an `it`
-  // titled "passes" is counted as a pass, which is the silent skip this branch exists to prevent.
-  it.for(SUITES)('%s passes', { timeout: 310_000 }, (name, ctx) => {
+  // is counted as a pass, which is the silent skip this branch exists to prevent. The title is the
+  // bare file name (no "passes"), so the line reads correctly whether the suite passed or skipped.
+  it.for(SUITES)('%s', { timeout: 310_000 }, (name, ctx) => {
     const runner = name.endsWith('.py') ? 'python3' : 'bash'
     const res = spawnSync(runner, [join(DIR, name)], {
       encoding: 'utf-8',

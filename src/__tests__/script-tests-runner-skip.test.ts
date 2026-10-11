@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SKIP_EXIT, hasSkipReason, suiteOutcome } from './setup/suite-outcome.js'
@@ -65,5 +65,31 @@ describe('the suite runner tells a SKIP apart from a pass and from a failure', (
       encoding: 'utf-8',
     })
     expect(Number(src.stdout.trim())).toBeGreaterThan(0)
+  })
+
+  // The runner's own use of the two pieces is a source pin, because nothing else notices a regression:
+  // on a host where the real suite skips, a plain `return` (the shape of the previous round) keeps every
+  // test green and only changes the reporter from skipped back to passed, and the real suite always prints
+  // the marker, so dropping the assertion is invisible too. Measured by the reviewer with both mutants.
+  describe('the runner itself (source pin)', () => {
+    const src = readFileSync(join(__dirname, 'script-tests-runner.test.ts'), 'utf-8')
+    const open = src.indexOf("if (suiteOutcome(res.status) === 'skip') {")
+    const close = src.indexOf('if (res.status !== 0) {', open)
+    const branch = open >= 0 && close > open ? src.slice(open, close) : ''
+
+    it('finds the 77 branch (a rename of the branch must not empty the pins below)', () => {
+      expect(branch).not.toBe('')
+    })
+
+    it('the 77 branch ends in ctx.skip(, not in a plain return that the reporter counts as a pass', () => {
+      expect(branch).toContain('ctx.skip(')
+    })
+
+    it('the 77 branch asserts hasSkipReason(why) BEFORE it skips', () => {
+      const assertAt = branch.search(/expect\(\s*hasSkipReason\(why\)/)
+      const skipAt = branch.indexOf('ctx.skip(')
+      expect(assertAt).toBeGreaterThanOrEqual(0)
+      expect(skipAt).toBeGreaterThan(assertAt)
+    })
   })
 })
