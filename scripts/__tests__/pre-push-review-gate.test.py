@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Test the pre-push Sam-green gate (scripts/git-hooks/pre-push-sam-green.py), card ee1a22f1.
+"""Test the pre-push reviewer-green gate (scripts/git-hooks/pre-push-review-gate.py), card ee1a22f1.
 
 Real git, real installer, real dispatcher: every case runs an actual `git push` from a throwaway
-repo to a bare remote, with the hook installed by scripts/install-sam-green-gate-hook.sh. The
+repo to a bare remote, with the hook installed by scripts/install-review-gate-hook.sh. The
 dashboard is a local stub (a thread serving /api/messages), so nothing here touches the live
 mailbox, the live .git/hooks or the network. Run:
-  python3 scripts/__tests__/pre-push-sam-green.test.py
+  python3 scripts/__tests__/pre-push-review-gate.test.py
 Exit 0 = all pass; non-zero = a failure (message on stderr).
 
 What this file guards above all, in the order the gate can go wrong:
   - the FAIL direction: a stub that cannot be reached, a missing token, a malformed answer must
     BLOCK, never pass;
-  - the lookalikes that must NOT count as a trace: Sam's line with text after the hash, a sentence
+  - the lookalikes that must NOT count as a trace: the reviewer's line with text after the hash, a sentence
     mentioning the token, a row from another sender, a failed row, a 7-digit prefix, a green for
     the OLD head after an amend;
   - what needs NO trace and must pass without even asking the dashboard (deletion, a commit that
@@ -33,8 +33,8 @@ SCRIPTS = os.path.dirname(HERE)
 CLEAN_ENV = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 CLEAN_ENV.update({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
                   "GIT_COMMITTER_EMAIL": "t@t"})
-for _k in ("SKIP_SAM_GREEN_GATE", "SAM_GREEN_SKIP_REASON", "MARVEEN_API_BASE", "MARVEEN_WEB_PORT",
-           "WEB_PORT", "MARVEEN_TOKEN_FILE", "SAM_GREEN_INSTALL_ROOT", "SAM_GREEN_REVIEWER", "SAM_GREEN_TRACE_WORD"):
+for _k in ("REVIEW_GATE_SKIP", "REVIEW_GATE_SKIP_REASON", "MARVEEN_API_BASE", "MARVEEN_WEB_PORT",
+           "WEB_PORT", "MARVEEN_TOKEN_FILE", "REVIEW_GATE_INSTALL_ROOT", "REVIEW_GATE_REVIEWER", "REVIEW_GATE_TRACE_WORD"):
     CLEAN_ENV.pop(_k, None)
 # The gate applies to agent sessions only (Laci, 2026-10-11, 5b). The suite itself may run inside one,
 # so the agent markers are removed here and the agent case is put back explicitly in setUp.
@@ -97,11 +97,11 @@ def sh(*cmd, cwd=None, env=None, check=True):
     return p
 
 
-class SamGreen(unittest.TestCase):
+class ReviewGate(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.stub = Stub()
-        cls.tmp = tempfile.mkdtemp(prefix="samgreen-")
+        cls.tmp = tempfile.mkdtemp(prefix="reviewgate-")
         cls.n = 0
 
     @classmethod
@@ -110,11 +110,11 @@ class SamGreen(unittest.TestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def setUp(self):
-        SamGreen.n += 1
+        ReviewGate.n += 1
         self.stub.rows.clear()
         self.stub.requests.clear()
         self.stub.next_id = 1
-        base = os.path.join(self.tmp, "case%d" % SamGreen.n)
+        base = os.path.join(self.tmp, "case%d" % ReviewGate.n)
         self.repo = os.path.join(base, "repo")
         self.bare = os.path.join(base, "fork.git")
         self.upbare = os.path.join(base, "up.git")
@@ -123,10 +123,10 @@ class SamGreen(unittest.TestCase):
         sh("git", "init", "-q", "--bare", "-b", "develop", self.bare)
         sh("git", "init", "-q", "--bare", "-b", "develop", self.upbare)
         sh("git", "init", "-q", "-b", "develop", self.repo)
-        for f in ("install-sam-green-gate-hook.sh", "install-git-guard-hook.sh"):
+        for f in ("install-review-gate-hook.sh", "install-git-guard-hook.sh"):
             shutil.copy(os.path.join(SCRIPTS, f), os.path.join(self.repo, "scripts", f))
-        shutil.copy(os.path.join(SCRIPTS, "git-hooks", "pre-push-sam-green.py"),
-                    os.path.join(self.repo, "scripts", "git-hooks", "pre-push-sam-green.py"))
+        shutil.copy(os.path.join(SCRIPTS, "git-hooks", "pre-push-review-gate.py"),
+                    os.path.join(self.repo, "scripts", "git-hooks", "pre-push-review-gate.py"))
         with open(os.path.join(self.repo, "store", ".dashboard-token"), "w") as fh:
             fh.write("test-token\n")
         sh("git", "remote", "add", "origin", self.upbare, cwd=self.repo)
@@ -137,10 +137,10 @@ class SamGreen(unittest.TestCase):
         sh("git", "push", "-q", "fork", "develop", cwd=self.repo)
         sh("git", "fetch", "-q", "origin", cwd=self.repo)
         sh("git", "fetch", "-q", "fork", cwd=self.repo)
-        sh("bash", os.path.join(self.repo, "scripts", "install-sam-green-gate-hook.sh"), cwd=self.repo)
+        sh("bash", os.path.join(self.repo, "scripts", "install-review-gate-hook.sh"), cwd=self.repo)
         # self.env is an AGENT push (CLAUDECODE set); self.laci_env is a hand push (no marker).
         self.laci_env = dict(CLEAN_ENV, MARVEEN_API_BASE="http://127.0.0.1:%d" % self.stub.port,
-                             SAM_GREEN_REVIEWER="sam", SAM_GREEN_TRACE_WORD="SAM-ZOLD")
+                             REVIEW_GATE_REVIEWER="sam", REVIEW_GATE_TRACE_WORD="SAM-ZOLD")
         self.env = dict(self.laci_env, CLAUDECODE="1")
         sh("git", "checkout", "-q", "-b", "feature", cwd=self.repo)
 
@@ -159,7 +159,7 @@ class SamGreen(unittest.TestCase):
                               capture_output=True, text=True)
 
     def hook_path(self):
-        return os.path.join(self.repo, ".git", "hooks", "pre-push.d", "30-sam-green-gate")
+        return os.path.join(self.repo, ".git", "hooks", "pre-push.d", "30-review-gate")
 
     # ---- the trace -------------------------------------------------------------------------
 
@@ -358,7 +358,7 @@ class SamGreen(unittest.TestCase):
 
     def test_an_unset_reviewer_means_the_gate_is_inactive(self):
         self.commit("a")
-        env = self.env_without("SAM_GREEN_REVIEWER", "SAM_GREEN_TRACE_WORD")
+        env = self.env_without("REVIEW_GATE_REVIEWER", "REVIEW_GATE_TRACE_WORD")
         for remote in ("fork", "origin"):
             p = self.push(remote, "feature", env=env)
             self.assertEqual(p.returncode, 0, p.stderr)
@@ -368,8 +368,8 @@ class SamGreen(unittest.TestCase):
     def test_reviewer_and_word_can_come_from_the_install_dotenv(self):
         h = self.commit("a")
         with open(os.path.join(self.repo, ".env"), "w") as fh:
-            fh.write("SAM_GREEN_REVIEWER=sam\nSAM_GREEN_TRACE_WORD='SAM-ZOLD'\n")
-        env = self.env_without("SAM_GREEN_REVIEWER", "SAM_GREEN_TRACE_WORD")
+            fh.write("REVIEW_GATE_REVIEWER=sam\nREVIEW_GATE_TRACE_WORD='SAM-ZOLD'\n")
+        env = self.env_without("REVIEW_GATE_REVIEWER", "REVIEW_GATE_TRACE_WORD")
         p = self.push("fork", "feature", env=env)
         self.assertNotEqual(p.returncode, 0, p.stderr)
         self.assertIn("has no green trace from sam", p.stderr)
@@ -379,7 +379,7 @@ class SamGreen(unittest.TestCase):
 
     def test_another_reviewer_and_the_default_word_and_no_name_in_the_texts(self):
         h = self.commit("a")
-        env = dict(self.env_without("SAM_GREEN_TRACE_WORD"), SAM_GREEN_REVIEWER="reviewer2")
+        env = dict(self.env_without("REVIEW_GATE_TRACE_WORD"), REVIEW_GATE_REVIEWER="reviewer2")
         self.stub.add("SAM-ZOLD " + h[:12], frm="reviewer2")  # right sender, wrong word
         p = self.push("fork", "feature", env=env)
         self.assertNotEqual(p.returncode, 0, p.stderr)
@@ -395,17 +395,40 @@ class SamGreen(unittest.TestCase):
 
     def test_a_misconfigured_reviewer_or_word_blocks(self):
         self.commit("a")
-        for key, val in (("SAM_GREEN_REVIEWER", "sam&x=1"), ("SAM_GREEN_TRACE_WORD", "a b")):
+        for key, val in (("REVIEW_GATE_REVIEWER", "sam&x=1"), ("REVIEW_GATE_TRACE_WORD", "a b")):
             with self.subTest(key=key):
                 p = self.push("fork", "feature", env=dict(self.env, **{key: val}))
                 self.assertNotEqual(p.returncode, 0, p.stderr)
                 self.assertIn("misconfigured", p.stderr)
         self.assertEqual(self.stub.requests, [])
 
+    def test_dotenv_lines_are_read_like_the_product_reader_plus_export(self):
+        h = self.commit("a")
+        env = self.env_without("REVIEW_GATE_REVIEWER", "REVIEW_GATE_TRACE_WORD")
+        dotenv = os.path.join(self.repo, ".env")
+        cases = {
+            "export prefix": "export REVIEW_GATE_REVIEWER=sam\nexport REVIEW_GATE_TRACE_WORD=SAM-ZOLD\n",
+            "export + quotes + spaces": "  export  REVIEW_GATE_REVIEWER = \"sam\"  \n# c\nREVIEW_GATE_TRACE_WORD='SAM-ZOLD'\n",
+            "last occurrence wins": "REVIEW_GATE_REVIEWER=other\nREVIEW_GATE_REVIEWER=sam\nREVIEW_GATE_TRACE_WORD=SAM-ZOLD\n",
+        }
+        for label, body in cases.items():
+            with self.subTest(case=label):
+                with open(dotenv, "w") as fh:
+                    fh.write(body)
+                p = self.push("fork", "feature", env=env)
+                self.assertNotEqual(p.returncode, 0, "the gate must be ACTIVE for %r: %s" % (label, p.stderr))
+                self.assertIn("has no green trace from sam", p.stderr)
+        # a commented-out line is NOT a setting
+        with open(dotenv, "w") as fh:
+            fh.write("# REVIEW_GATE_REVIEWER=sam\n")
+        p = self.push("fork", "feature", env=env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("INACTIVE", p.stderr)
+
     # ---- the installer (upstream review of #1888, finding 2) -------------------------------
 
     def installer(self):
-        return os.path.join(self.repo, "scripts", "install-sam-green-gate-hook.sh")
+        return os.path.join(self.repo, "scripts", "install-review-gate-hook.sh")
 
     def test_the_installer_refuses_loudly_when_core_hooks_path_points_elsewhere(self):
         os.makedirs(os.path.join(self.repo, ".githooks"))
@@ -415,11 +438,26 @@ class SamGreen(unittest.TestCase):
         self.assertIn("would enforce NOTHING", p.stderr)
         self.assertNotIn("installed", p.stdout)
 
+    def test_the_installer_removes_the_first_generation_hook_and_only_that(self):
+        d = os.path.join(self.repo, ".git", "hooks", "pre-push.d")
+        legacy = os.path.join(d, "30-sam-green-gate")
+        with open(legacy, "w") as fh:
+            fh.write('#!/usr/bin/env python3\n"""pre-push gate: outgoing code needs a Sam-green trace"""\n')
+        os.chmod(legacy, 0o755)
+        p = sh("bash", self.installer(), cwd=self.repo)
+        self.assertFalse(os.path.exists(legacy), p.stdout)
+        self.assertTrue(os.path.exists(self.hook_path()))
+        # an unrelated file under that name is left alone
+        with open(legacy, "w") as fh:
+            fh.write("#!/bin/sh\necho mine\n")
+        sh("bash", self.installer(), cwd=self.repo)
+        self.assertTrue(os.path.exists(legacy))
+
     def test_the_installer_accepts_core_hooks_path_equal_to_the_hook_dir(self):
         sh("git", "config", "core.hooksPath", os.path.join(self.repo, ".git", "hooks"), cwd=self.repo)
         p = sh("bash", self.installer(), cwd=self.repo, check=False)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertIn("INACTIVE until SAM_GREEN_REVIEWER", p.stdout)
+        self.assertIn("INACTIVE until REVIEW_GATE_REVIEWER", p.stdout)
 
     # ---- fail-closed branches that were reachable but unpinned (finding 3) ------------------
 
@@ -463,16 +501,16 @@ class SamGreen(unittest.TestCase):
 
     def test_skip_without_a_reason_is_refused(self):
         self.commit("a")
-        p = self.push("fork", "feature", env=dict(self.env, SKIP_SAM_GREEN_GATE="1"))
+        p = self.push("fork", "feature", env=dict(self.env, REVIEW_GATE_SKIP="1"))
         self.assertNotEqual(p.returncode, 0)
-        self.assertIn("needs SAM_GREEN_SKIP_REASON", p.stderr)
+        self.assertIn("needs REVIEW_GATE_SKIP_REASON", p.stderr)
 
     def test_skip_with_a_reason_passes_and_is_recorded(self):
         h = self.commit("a")
-        env = dict(self.env, SKIP_SAM_GREEN_GATE="1", SAM_GREEN_SKIP_REASON="owner msg 9999: emergency hotfix")
+        env = dict(self.env, REVIEW_GATE_SKIP="1", REVIEW_GATE_SKIP_REASON="owner msg 9999: emergency hotfix")
         p = self.push("fork", "feature", env=env)
         self.assertEqual(p.returncode, 0, p.stderr)
-        with open(os.path.join(self.repo, "store", "push-samgreen-skips.log")) as fh:
+        with open(os.path.join(self.repo, "store", "push-review-gate-skips.log")) as fh:
             log = fh.read()
         self.assertIn("owner msg 9999: emergency hotfix", log)
         self.assertIn(h, log)
@@ -480,8 +518,8 @@ class SamGreen(unittest.TestCase):
 
     def test_a_skip_that_cannot_be_recorded_is_refused(self):
         self.commit("a")
-        os.symlink("/nonexistent-dir/x.log", os.path.join(self.repo, "store", "push-samgreen-skips.log"))
-        env = dict(self.env, SKIP_SAM_GREEN_GATE="1", SAM_GREEN_SKIP_REASON="owner msg 9999: emergency hotfix")
+        os.symlink("/nonexistent-dir/x.log", os.path.join(self.repo, "store", "push-review-gate-skips.log"))
+        env = dict(self.env, REVIEW_GATE_SKIP="1", REVIEW_GATE_SKIP_REASON="owner msg 9999: emergency hotfix")
         p = self.push("fork", "feature", env=env)
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("unrecorded skip is refused", p.stderr)

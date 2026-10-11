@@ -43,8 +43,8 @@ const INSTALLERS = [
     dispatcher: join('.git', 'hooks', 'pre-commit'),
   },
   {
-    script: 'install-sam-green-gate-hook.sh',
-    guard: join('.git', 'hooks', 'pre-push.d', '30-sam-green-gate'),
+    script: 'install-review-gate-hook.sh',
+    guard: join('.git', 'hooks', 'pre-push.d', '30-review-gate'),
     dispatcher: join('.git', 'hooks', 'pre-push'),
   },
 ] as const
@@ -53,7 +53,7 @@ const INSTALLERS = [
  *  borrows the git-guard installer for the dispatcher). */
 const COMPANIONS = [
   join('scripts', 'install-git-guard-hook.sh'),
-  join('scripts', 'git-hooks', 'pre-push-sam-green.py'),
+  join('scripts', 'git-hooks', 'pre-push-review-gate.py'),
 ]
 
 const stage = mkdtempSync(join(tmpdir(), 'hookcwd-'))
@@ -71,7 +71,7 @@ function makeRepo(label: string, script?: string): string {
   execFileSync('git', ['-C', repo, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'])
   if (script) {
     cpSync(join(ROOT, 'scripts', script), join(repo, 'scripts', script))
-    if (script === 'install-sam-green-gate-hook.sh') {
+    if (script === 'install-review-gate-hook.sh') {
       for (const f of COMPANIONS) {
         mkdirSync(join(repo, f, '..'), { recursive: true })
         cpSync(join(ROOT, f), join(repo, f))

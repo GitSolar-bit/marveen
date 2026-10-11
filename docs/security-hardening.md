@@ -33,9 +33,9 @@ The owner's rule: code that goes outward (a push, a force-push, an update of a P
 only after the reviewer agent's approval; a green test is not enough. The rule used to live in
 instruction files and nothing enforced it.
 
-`scripts/install-sam-green-gate-hook.sh` (run by `scripts/sync-hooks.sh`, like the other
-installers) copies `scripts/git-hooks/pre-push-sam-green.py` into
-`.git/hooks/pre-push.d/30-sam-green-gate`.
+`scripts/install-review-gate-hook.sh` (run by `scripts/sync-hooks.sh`, like the other
+installers) copies `scripts/git-hooks/pre-push-review-gate.py` into
+`.git/hooks/pre-push.d/30-review-gate`.
 
 **It is opt-in.** The hook is installed on every install, but it does nothing (every push
 passes, one stderr line says so) until a reviewer agent is configured. Without that, an install
@@ -43,13 +43,16 @@ that has no such agent would have every agent push stopped for good. Set, in the
 the push or as a line in `<install>/.env`:
 
 ```
-SAM_GREEN_REVIEWER=<agent id of the reviewer>      # unset = gate inactive
-SAM_GREEN_TRACE_WORD=<word that starts the trace>  # optional, default REVIEW-GREEN
+REVIEW_GATE_REVIEWER=<agent id of the reviewer>      # unset = gate inactive
+REVIEW_GATE_TRACE_WORD=<word that starts the trace>  # optional, default REVIEW-GREEN
 ```
 
-A reviewer id or trace word with characters outside letters, digits, `-` and `_` blocks the
-push (a gate that is misconfigured fails closed). The originating install sets
-`SAM_GREEN_REVIEWER=sam` and `SAM_GREEN_TRACE_WORD=SAM-ZOLD`.
+The `.env` lines are read the way the product's own reader does (trimmed, `#` comments, one pair
+of quotes stripped, the last occurrence wins), and a leading `export ` is accepted too: a gate
+that reads `export NAME=value` as "not set" would be silently off. A reviewer id or trace word
+with characters outside letters, digits, `-` and `_` blocks the push (a gate that is
+misconfigured fails closed). The originating install sets
+`REVIEW_GATE_REVIEWER=sam` and `REVIEW_GATE_TRACE_WORD=SAM-ZOLD`.
 
 **It gates agent sessions only** (the owner's decision, 2026-10-11): a push that does not come
 from a Claude Code session goes through without a trace, with one line on stderr, so the
@@ -97,13 +100,16 @@ as proof that the reviewer reviewed the change.
 stderr, nothing installed) instead of printing a success line. `sync-hooks.sh` reports the
 non-zero exit and carries on.
 
-**Undo.** There is no uninstaller: remove `.git/hooks/pre-push.d/30-sam-green-gate`. Running the
+**Undo.** There is no uninstaller: remove `.git/hooks/pre-push.d/30-review-gate`. Running the
 installer again puts it back.
 
+**Earlier development version.** The installer also removes `pre-push.d/30-sam-green-gate`, the file
+an earlier development version of this gate was installed as, when it recognises it as this gate's own.
+
 **The way through, only on the owner's explicit instruction for that push:** set
-`SKIP_SAM_GREEN_GATE=1` and `SAM_GREEN_SKIP_REASON="<owner message id>: <why>"` in the
+`REVIEW_GATE_SKIP=1` and `REVIEW_GATE_SKIP_REASON="<owner message id>: <why>"` in the
 environment of the push command. The reason is mandatory and the call is appended to
-`store/push-samgreen-skips.log` (who, when, remote, refs, reason); if the line cannot be
+`store/push-review-gate-skips.log` (who, when, remote, refs, reason); if the line cannot be
 written the push is refused.
 
 # Bash egress deny rules

@@ -5,11 +5,11 @@ Card ee1a22f1 (parent 548bb2a4). The owner's rule: "code that goes outward (push
 updating a PR branch) only after the reviewer agent's approval; a green test is not enough". The
 rule lived in instruction files and nothing enforced it.
 
-OPT-IN. The gate is INACTIVE until a reviewer agent id is configured: SAM_GREEN_REVIEWER, in the
+OPT-IN. The gate is INACTIVE until a reviewer agent id is configured: REVIEW_GATE_REVIEWER, in the
 environment of the push or as a line in <install>/.env. Unset means every push passes with one
 stderr line. This matters because the installer puts the hook on every install (sync-hooks.sh runs
 it on update): an install without that reviewer agent must not have all agent pushes stopped for
-good. SAM_GREEN_TRACE_WORD (default REVIEW-GREEN) is the word the reviewer's line starts with. Both
+good. REVIEW_GATE_TRACE_WORD (default REVIEW-GREEN) is the word the reviewer's line starts with. Both
 are validated, and an invalid value BLOCKS: a gate that is misconfigured fails closed, loudly.
 
 WHAT THIS GATE IS FOR. It guards against FORGETTING the rule. It is NOT evidence that the reviewer
@@ -20,7 +20,7 @@ from the code, stated here so nobody reads this as stronger than it is:
      The gate checks that the row exists, not who typed it.
   2. `git push --no-verify` and `git -c core.hooksPath=/dev/null push` skip EVERY pre-push
      hook, this one included, and leave no line anywhere.
-  3. SKIP_SAM_GREEN_GATE=1 (below) is an override by design.
+  3. REVIEW_GATE_SKIP=1 (below) is an override by design.
 A fourth, found in review: if the repository's core.hooksPath points somewhere other than the hooks
 directory the installer writes to, git never runs this hook at all. The installer refuses loudly in
 that case instead of printing a success line.
@@ -67,14 +67,14 @@ unexpected shape, a ref that does not resolve, git failing) BLOCKS. The bypass b
 through, and it is logged.
 
 BYPASS, ONLY ON THE OWNER'S EXPLICIT INSTRUCTION FOR THAT PUSH:
-  SKIP_SAM_GREEN_GATE=1 SAM_GREEN_SKIP_REASON="<owner message id>: <why>" git push ...
-The reason is mandatory and the call is recorded in <install>/store/push-samgreen-skips.log
+  REVIEW_GATE_SKIP=1 REVIEW_GATE_SKIP_REASON="<owner message id>: <why>" git push ...
+The reason is mandatory and the call is recorded in <install>/store/push-review-gate-skips.log
 (who, when, remote, refs, reason). If the line cannot be written the push is refused: an
 override nothing records is the hole.
 
 Env (the first group is read from the environment, then from <install>/.env):
-  SAM_GREEN_REVIEWER    reviewer agent id (letters, digits, - and _). Unset = gate inactive.
-  SAM_GREEN_TRACE_WORD  the word that starts the trace line (default REVIEW-GREEN)
+  REVIEW_GATE_REVIEWER    reviewer agent id (letters, digits, - and _). Unset = gate inactive.
+  REVIEW_GATE_TRACE_WORD  the word that starts the trace line (default REVIEW-GREEN)
 The rest (same names as scripts/agent-msg.sh):
   MARVEEN_API_BASE    full base URL (overrides host+port)
   MARVEEN_WEB_PORT    dashboard port (then WEB_PORT in the env, then in <install>/.env, then 3420)
@@ -103,9 +103,9 @@ MAX_PAGES = 10  # 2000 of the reviewer's messages back; a green older than that 
 MIN_REASON = 8
 
 # <install>/.git/hooks/pre-push.d/<this file>  ->  <install>
-INSTALL = Path(os.environ.get("SAM_GREEN_INSTALL_ROOT") or Path(__file__).resolve().parents[3])
+INSTALL = Path(os.environ.get("REVIEW_GATE_INSTALL_ROOT") or Path(__file__).resolve().parents[3])
 STORE = INSTALL / "store"
-SKIPLOG = STORE / "push-samgreen-skips.log"
+SKIPLOG = STORE / "push-review-gate-skips.log"
 
 
 def agent_session():
@@ -123,13 +123,29 @@ def cfg(name):
     val = (os.environ.get(name) or "").strip()
     if val:
         return val
+    found = ""
     try:
-        for line in (INSTALL / ".env").read_text().splitlines():
-            if line.startswith(name + "="):
-                return line.split("=", 1)[1].strip().strip("\"'")
+        text = (INSTALL / ".env").read_text()
     except OSError:
-        pass
-    return ""
+        return ""
+    # Parsed like the product's own .env reader (src/env-parse.ts): trimmed lines, "#" comments, the
+    # first "=" splits, one pair of matching quotes is stripped, the LAST occurrence wins. One addition:
+    # a leading `export ` is accepted. Without it an `export NAME=value` line (a normal shell habit) would
+    # read as "not set", and a gate that reads as not set is a gate that is silently off.
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if re.match(r"export[ \t]", line):
+            line = line[len("export"):].lstrip()
+        key, sep, value = line.partition("=")
+        if not sep or key.strip() != name:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        found = value
+    return found.strip()
 
 
 def api_base():
@@ -218,25 +234,25 @@ def main():
                          "trace is NOT checked (card ee1a22f1).\n" % ", ".join(AGENT_MARKERS))
         return 0
 
-    reviewer = cfg("SAM_GREEN_REVIEWER")
+    reviewer = cfg("REVIEW_GATE_REVIEWER")
     if not reviewer:
-        sys.stderr.write("pre-push: reviewer-green gate INACTIVE (SAM_GREEN_REVIEWER is not set in the environment "
+        sys.stderr.write("pre-push: reviewer-green gate INACTIVE (REVIEW_GATE_REVIEWER is not set in the environment "
                          "or in %s) -- nothing is checked (card ee1a22f1).\n" % (INSTALL / ".env"))
         return 0
-    word = cfg("SAM_GREEN_TRACE_WORD") or DEFAULT_TRACE_WORD
+    word = cfg("REVIEW_GATE_TRACE_WORD") or DEFAULT_TRACE_WORD
     if not REVIEWER_RE.match(reviewer) or not TRACE_WORD_RE.match(word):
-        sys.stderr.write("pre-push BLOCKED (reviewer-green): the gate is misconfigured. SAM_GREEN_REVIEWER must be "
-                         "1-40 letters, digits, - or _; SAM_GREEN_TRACE_WORD 3-40 of the same. A gate that cannot "
+        sys.stderr.write("pre-push BLOCKED (reviewer-green): the gate is misconfigured. REVIEW_GATE_REVIEWER must be "
+                         "1-40 letters, digits, - or _; REVIEW_GATE_TRACE_WORD 3-40 of the same. A gate that cannot "
                          "be configured safely refuses the push.\n")
         return 1
 
-    if os.environ.get("SKIP_SAM_GREEN_GATE") == "1":
-        reason = (os.environ.get("SAM_GREEN_SKIP_REASON") or "").strip()
+    if os.environ.get("REVIEW_GATE_SKIP") == "1":
+        reason = (os.environ.get("REVIEW_GATE_SKIP_REASON") or "").strip()
         if len(reason) < MIN_REASON:
-            sys.stderr.write("pre-push BLOCKED (reviewer-green): SKIP_SAM_GREEN_GATE=1 needs SAM_GREEN_SKIP_REASON"
+            sys.stderr.write("pre-push BLOCKED (reviewer-green): REVIEW_GATE_SKIP=1 needs REVIEW_GATE_SKIP_REASON"
                              "=\"<owner message id>: <why>\" (at least %d characters). A skip with no reason is refused.\n" % MIN_REASON)
             return 1
-        sys.stderr.write("pre-push: SKIP_SAM_GREEN_GATE=1 -- the reviewer-green trace is NOT checked.\n")
+        sys.stderr.write("pre-push: REVIEW_GATE_SKIP=1 -- the reviewer-green trace is NOT checked.\n")
         if not record_skip(remote, url, payload, reason):
             sys.stderr.write("pre-push BLOCKED (reviewer-green): the skip could not be recorded in %s, and an "
                              "unrecorded skip is refused.\n" % SKIPLOG)
@@ -305,8 +321,8 @@ def main():
         sys.stderr.write(
             "  This gate guards against FORGETTING the owner's rule; it is not proof of review.\n"
             "  Only on the owner's explicit instruction for this push:\n"
-            "      SKIP_SAM_GREEN_GATE=1 SAM_GREEN_SKIP_REASON=\"<owner message id>: <why>\" git push ...\n"
-            "  (recorded in store/push-samgreen-skips.log).\n")
+            "      REVIEW_GATE_SKIP=1 REVIEW_GATE_SKIP_REASON=\"<owner message id>: <why>\" git push ...\n"
+            "  (recorded in store/push-review-gate-skips.log).\n")
     return fail
 
 
