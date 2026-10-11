@@ -27,7 +27,11 @@ echoing an outgoing message into it would put arbitrary text in the harness's ow
 
 INSTRUMENT. Each warning appends one line (time, counter, numbers found; NO message text) to
 store/napi-szamozas-figyelmeztetes.log, so how often it fires, and whether it fires at all, is
-measurable without reading anyone's messages. The weekly check (Sam, card 548bb2a4) compares that
+measurable without reading anyone's messages. A list from 1 sent while the counter file is not
+today's (card 3669ee68) writes the same kind of line, "allapot-nem-mai datum=<the file's date>", and
+no warning: that was the measured failure mode (nobody refreshed the counter today), and a watcher
+that stays mute there cannot be told apart from one that saw nothing. A missing or unreadable
+counter file writes nothing (there is no state to describe). The weekly check (Sam, card 548bb2a4) compares that
 log with the Telegram replies.
 
 CONTRACT. Exit 0 on every path, including a malformed payload. A guard that raises blocks the agent's
@@ -84,15 +88,28 @@ def load_state():
     return d if isinstance(d, dict) else None
 
 
-def log_line(next_no, items):
+def _log(fields, items):
     try:
         os.makedirs(os.path.dirname(LOG), exist_ok=True)
         with open(LOG, "a", encoding="utf-8") as fh:
-            fh.write("%s kovetkezo=%s szamok=%s\n" % (
-                datetime.datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z"), next_no,
+            fh.write("%s %s szamok=%s\n" % (
+                datetime.datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z"), fields,
                 ",".join(str(i) for i in items[:20])))
     except OSError:
         pass
+
+
+def log_line(next_no, items):
+    _log("kovetkezo=%s" % next_no, items)
+
+
+def log_stale(state_date, items):
+    """A list from 1 went out while the counter file is NOT today's (card 3669ee68). No warning: with no
+    counter for today the list may well be the day's first. The line is the instrument: the failure mode
+    that was measured (the counter not refreshed today) would otherwise leave the watcher mute and
+    indistinguishable from "nothing happened". The file's date is data, so only a plain date is written."""
+    d = state_date if isinstance(state_date, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", state_date) else "?"
+    _log("allapot-nem-mai datum=%s" % d, items)
 
 
 def warning(next_no, open_nums):
@@ -126,7 +143,12 @@ def main():
         return
 
     state = load_state()
-    if state is None or state.get("datum") != today():
+    if state is None:
+        return
+    if state.get("datum") != today():
+        items = numbered_items(text)
+        if starts_a_list_at_one(items):
+            log_stale(state.get("datum"), items)
         return
     next_no = state.get("kovetkezo")
     if not isinstance(next_no, int) or isinstance(next_no, bool) or next_no <= 1:

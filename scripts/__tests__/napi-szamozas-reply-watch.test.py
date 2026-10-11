@@ -100,6 +100,51 @@ class Watch(unittest.TestCase):
         self.write_state(datum="2026-10-10", kovetkezo=9)
         self.assertFalse(self.warned(self.run_hook(LIST_FROM_ONE)))
 
+    def read_log(self):
+        try:
+            with open(self.log, encoding="utf-8") as fh:
+                return fh.read()
+        except OSError:
+            return ""
+
+    # ---- card 3669ee68: the stale-state line --------------------------------------------------
+
+    def test_a_list_from_one_with_yesterdays_counter_is_silent_but_logged(self):
+        self.write_state(datum="2026-10-10", kovetkezo=9)
+        p = self.run_hook(LIST_FROM_ONE)
+        self.assertFalse(self.warned(p), "no warning: with no counter for today the list may be the day's first")
+        logged = self.read_log()
+        self.assertIn("allapot-nem-mai datum=2026-10-10 szamok=1,2,3", logged)
+        self.assertEqual(len(logged.splitlines()), 1)
+
+    def test_the_stale_line_never_carries_message_text_or_a_foreign_date_string(self):
+        secret = "TITOKSZOVEG-77c1"
+        self.write_state(datum="2026-10-10 %s" % secret, kovetkezo=9)
+        self.run_hook("1. %s\n2. más" % secret)
+        logged = self.read_log()
+        self.assertNotIn(secret, logged)
+        self.assertIn("allapot-nem-mai datum=?", logged)
+
+    def test_the_stale_line_needs_a_list_from_one(self):
+        self.write_state(datum="2026-10-10", kovetkezo=9)
+        for text in ("Nincs lista", "4. Negyedik\n5. Ötödik", "Csak egy:\n1. Egyetlen"):
+            self.run_hook(text)
+        self.assertEqual(self.read_log(), "")
+
+    def test_a_missing_or_broken_state_writes_no_stale_line(self):
+        os.remove(self.state)
+        self.run_hook(LIST_FROM_ONE)
+        with open(self.state, "w") as fh:
+            fh.write("not json")
+        self.run_hook(LIST_FROM_ONE)
+        self.assertEqual(self.read_log(), "")
+
+    def test_todays_state_never_writes_the_stale_line(self):
+        self.run_hook(LIST_FROM_ONE)  # warns
+        self.write_state(datum=TODAY, kovetkezo=1, tetelek=[])
+        self.run_hook(LIST_FROM_ONE)  # first list of the day, silent
+        self.assertNotIn("allapot-nem-mai", self.read_log())
+
     def test_a_list_that_continues_the_numbering_is_silent(self):
         self.assertFalse(self.warned(self.run_hook("4. Negyedik\n5. Ötödik")))
 
