@@ -2989,6 +2989,66 @@ check("segments_pos: a function substitution is cut like a substitution, its clo
       [s for s, _o in gate.segments_pos("x=$(echo a)${ echo b; }d rm -rf X")] == ["x=", "echo a", "echo b", "rm -rf X"])
 check("_token_spans: a legacy arithmetic expansion is one word part with its blanks",
       [t for t, _sp, _a, _b in gate._token_spans("x=$[ a[1] + 2 ] rm -rf X")] == ["x=$[ a[1] + 2 ]", "rm", "-rf", "X"])
+print("6b631f69 round 2 -- the shell cuts a word at an unquoted < and > as well (nohup>f rm, rm>f -rf x), and a ${..} is one word:")
+_REDIR2 = [
+    ("nohup and a glued redirection", "nohup>/dev/null MARK"),
+    ("nohup and a glued stdin", "nohup</dev/null MARK"),
+    ("nohup and a glued append", "nohup>>/dev/null MARK"),
+    ("nohup and a glued noclobber", "nohup>|/dev/null MARK"),
+    ("env", "env>/dev/null MARK"),
+    ("command", "command>/dev/null MARK"),
+    ("exec", "exec>/dev/null MARK"),
+    ("time", "time>/dev/null MARK"),
+    ("nice", "nice>/dev/null MARK"),
+    ("setsid", "setsid>/dev/null MARK"),
+    ("a keyword if", "if>/dev/null MARK; then :; fi"),
+    ("a bang", "!>/dev/null MARK"),
+    ("a brace group", "{>/dev/null MARK; }"),
+    ("then", "if true; then>/dev/null MARK; fi"),
+    ("do", "for a in 1; do>/dev/null MARK; done"),
+    ("rm and a glued redirection", "RMG>/dev/null -rf nothere"),
+    ("rm and a glued stdin", "RMG</dev/null -rf nothere"),
+    ("rm and a glued append", "RMG>>/dev/null -rf nothere"),
+    ("rm and a glued noclobber", "RMG>|/dev/null -rf nothere"),
+    ("rm and a glued &>", "RMG&>/dev/null -rf nothere"),
+    ("rm and a glued here-string", "RMG<<<x -rf nothere"),
+    ("rm and a glued dup", "RMG>&2 -rf nothere"),
+    ("rm and a glued fd redirection", "RMG 2>/dev/null -rf nothere"),
+    ("env, an option and a redirection after it", "env -u >/dev/null X MARK"),
+    ("env, an option with a glued redirection", "env -u>/dev/null X MARK"),
+    ("env -C and a glued redirection", "env -C>/dev/null /tmp MARK"),
+    ("exec -a and a redirection", "exec -a >/dev/null nm MARK"),
+    ("timeout -s and a redirection", "timeout -s >/dev/null KILL 5 MARK"),
+    ("timeout -s and a glued redirection", "timeout -s>/dev/null KILL 5 MARK"),
+    ("xargs -I and a redirection", "echo x | xargs -I >/dev/null {} MARK"),
+    ("xargs -I and a glued redirection", "echo x | xargs -I>/dev/null {} MARK"),
+    ("a redirection target with a blank in its default", "X=f; >${X:-a b} MARK"),
+    ("a redirection target with a prefix removal", "X=f; >${X#a b} MARK"),
+    ("a redirection target with a substitution", "X=f; >${X/ /} MARK"),
+    ("stderr to such a target", "X=f; 2>${X:-a b} MARK"),
+    ("an assignment with a blank in its expansion", "x=${Y:-a b} MARK"),
+    ("two assignments, the first with a blank in its expansion", "x=${Y:-a b} y=1 MARK"),
+    ("git glued to a redirection", "git>/dev/null push --force origin x"),
+    ("nohup glued to a redirection, then git push", "nohup>/dev/null git push --force origin x"),
+]
+for _lab, _t in _REDIR2:
+    _ran = _real_bash_runs_cmd(_t.replace("RMG", "rm"))
+    check("6b631f69 r2 fixture is real (bash runs the command): %s" % _lab, _ran is None or _ran)
+    check("6b631f69 r2 refused: %s" % _lab, blocks_cwd(_t.replace("RMG", RM).replace("nothere", GROOT + "/backups").replace("MARK", _RMX), GROOT))
+for _q in ("echo a>/tmp/x", "ls>/tmp/x", "cat /tmp/f&>/tmp/x", "echo \\>x", "echo 'a>b'", 'echo "a>b"', "echo ${X:-a b}", "x=${Y:-a b} ls /tmp", "nohup>/tmp/x ls /tmp",
+           "echo a>/tmp/f b", "FOO=1 2>/dev/null ls", "env -u X >/dev/null ls", "timeout -s KILL 5 >/dev/null ls", "echo x | xargs -I{} echo {} >/tmp/x", "git log>/tmp/x",
+           "git status>/dev/null", "x=<y ls", "if>/dev/null true; then :; fi", "echo $((1>2))", "cat <<< a>b", "[[ a > b ]] && echo y", "echo ${X:-a>b} ls"):
+    check("6b631f69 r2 stays quiet: %r" % _q, not blocks_cwd(_q, GROOT))
+check("_token_spans: a word is cut at an unquoted < or >, the fd digits, {name} and the & of &> stay with the operator, ${..} and an escaped operator do not cut",
+      [[t[0] for t in gate._token_spans(c)] for c in ("nohup>f rm", "rm&>f -rf x", "cat a&>f", "a 2>&1 b", ">f>g rm", "x=<y rm", "rm \\>x", ">${X:-a b} rm", "a>>f b", "{fd}>f rm", "a<<<x b")]
+      == [["nohup", ">f", "rm"], ["rm", "&>f", "-rf", "x"], ["cat", "a", "&>f"], ["a", "2>&1", "b"], [">f", ">g", "rm"], ["x=", "<y", "rm"], ["rm", "\\>x"],
+          [">${X:-a b}", "rm"], ["a", ">>f", "b"], ["{fd}>f", "rm"], ["a", "<<<x", "b"]])
+check("_token_spans: a ${ cmd; } function substitution is not a word part, a ${..} with a blank is flagged as holding one",
+      [gate._token_spans(c)[0][0] for c in ("${ }rm", "${ cmd; }x")] == ["${", "${"] and gate._token_spans("x=${Y:-a b}")[0][1] is True)
+check("_token_spans: a `<(` or `>(` glued to a word is not cut (bash reports a syntax error there; the process substitution itself is card e766e16c)",
+      [[t[0] for t in gate._token_spans(c)] for c in ("cat<(ls)", "echo a>(ls)")] == [["cat<(ls)"], ["echo", "a>(ls)"]])
+check("_param_brace_end: the closing brace, a nested one and a quoted or escaped one do not count",
+      [gate._param_brace_end(c, gate._quote_map(c), 2) for c in ("${a} b", "${a:-${b}} c", '${a:-"}"} d', "${a:-\\}} e", "${a")] == [3, 9, 8, 7, -1])
 
 # ---------------------------------------------------------------------------------------------------------------------------
 print("6a6191f4 -- a heredoc body handed on to a shell or an interpreter is a PROGRAM (cat <<EOF | sh), not data:")

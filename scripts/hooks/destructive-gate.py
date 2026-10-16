@@ -1963,6 +1963,24 @@ def _run_text(text, state, a, b):
     return _dq_unescape(text[a:b]) if a < len(text) and state[a] == 2 else text[a:b]
 
 
+def _param_brace_end(seg, state, k):
+    """Offset of the `}` that closes the `${` whose body starts at k, or -1. Only unquoted braces count, a backslash takes the next character."""
+    depth = 1
+    while k < len(seg):
+        if state[k] == 0:
+            if seg[k] == '\\':
+                k += 2
+                continue
+            if seg[k] == '{':
+                depth += 1
+            elif seg[k] == '}':
+                depth -= 1
+                if depth == 0:
+                    return k
+        k += 1
+    return -1
+
+
 def _token_spans(seg):
     """Idezojel-tudatos szavakra bontas. Elemek: (szoveg idezojel nelkul, volt-e benne
     idezojelen beluli szokoz, a szo kezdete, a szo vege (kizarolag) a szegmensben): _tokens() ennek a vetulete (card 4b42b6b0 round 3: the
@@ -1993,6 +2011,35 @@ def _token_spans(seg):
             cur.append(seg[i:b])
             i = b
             continue
+        if state[i] == 0 and ch == '\\' and i + 1 < len(seg) and seg[i + 1] in '<>&':
+            if wstart is None:
+                wstart = i
+            cur.append(seg[i:i + 2])           # an escaped `\>` is a letter of the word, not an operator (card 6b631f69 round 2)
+            i += 2
+            continue
+        if state[i] == 0 and seg.startswith('${', i) and seg[i + 2:i + 3] not in ('', ' ', '\t', '|'):    # `${ cmd; }` and `${|cmd;}` are command substitutions (card 8ed4c8e8), not a word part
+            j = _param_brace_end(seg, state, i + 2)
+            if j >= 0:                         # a parameter expansion is ONE word part, blanks and `>` inside it included (`>${X:-a b} rm`)
+                if wstart is None:
+                    wstart = i
+                if re.search(r'[ \t]', seg[i:j + 1]):
+                    had_space = True
+                cur.append(seg[i:j + 1])
+                i = j + 1
+                continue
+        if state[i] == 0 and ch in '<>' and not seg.startswith(('<(', '>('), i) and cur:
+            # the shell cuts a word at an unquoted `<` or `>` as well (`nohup>f rm`, `rm>f -rf x`, `git>f push` are a word and a redirection);
+            # the digits or `{name}` in front of the operator and the `&` of `&>` belong to it (card 6b631f69 round 2, Sam 4575)
+            raw = seg[wstart:i]
+            if not re.fullmatch(r'(?:\{[A-Za-z_]\w*\}|[0-9]+)?[<>&|]*', raw):
+                if raw.endswith('&') and state[i - 1] == 0 and cur[-1] == '&':
+                    cur.pop()
+                    if cur:
+                        toks.append((''.join(cur), had_space, wstart, i - 1))
+                    cur, had_space, wstart = ['&'], False, i - 1
+                else:
+                    toks.append((''.join(cur), had_space, wstart, i))
+                    cur, had_space, wstart = [], False, i
         if not state[i] and ch in ' \t':
             if cur:
                 toks.append((''.join(cur), had_space, wstart, i))
@@ -2291,7 +2338,11 @@ def _after_wrapper(toks, i):
             j += skip                # `timeout 5 >f rm x`: the shell takes the redirection out before timeout sees its words
             continue
         if t.startswith('-'):
-            j += 2 if t in _VALUE_FLAGS else 1
+            j += 1
+            if t in _VALUE_FLAGS:
+                while j < len(toks) and _redirect_len(toks, j):
+                    j += _redirect_len(toks, j)            # `timeout -s >f KILL 5 rm`, `xargs -I >f {} rm`
+                j += 1
             continue
         if _NUMERIC.match(t):        # timeout 5 CMD, nice 10 CMD
             j += 1
@@ -2359,6 +2410,8 @@ def command_index(toks):
                 if base == 'command' and opt in ('-v', '-V'):
                     return None          # csak lekerdez, nem futtat
                 if opt in valopts:
+                    while i < len(toks) and _redirect_len(toks, i):
+                        i += _redirect_len(toks, i)        # `env -u >f X rm`: the redirection is taken out before env sees its words
                     i += 1
             continue
         if base in _PREFIX_WRAPPERS:

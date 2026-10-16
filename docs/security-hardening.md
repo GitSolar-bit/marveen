@@ -1867,6 +1867,29 @@ was dead code (`command_index` skips keywords and braces itself), so it was remo
 
 Measured outside the list: the backtick form of the class (`` x=`echo a`b rm ``, also inside a function body) is refused on this head (the live gate allows the glued forms, rc 0 with the shell running rm; why this head refuses them was not analysed, so there is no row pinning it).
 Named limit: the commands inside a skipped `<(..)` / `$[..]` are not segmented (card e766e16c for the process substitution).
+## Round 2 of card 6b631f69: the shell cuts a word at `<` and `>` too (Sam 4575)
+
+Round 1 read a redirection that stands BEHIND a blank. The tokenizer (`_token_spans`) cut words at blanks only, but bash cuts them at the metacharacters `<` and `>` as well: `nohup>f rm -rf x`,
+`rm>f -rf x`, `env>f rm`, `if>f rm; then :; fi`, `git>f push --force`, `env -u>f X rm`, `timeout -s>f KILL 5 rm` are a word and a redirection, and the command runs. The glued word (`nohup>f`) matched no
+rule, so the real command name was never met. A `${..}` with a blank in it (`>${X:-a b} rm`, `x=${Y:-a b} rm`) was cut at the blank, so the redirection target ate the first half and `b}` read as the command.
+
+Three changes, all in the token reading:
+- **`_token_spans`** cuts a word at an unquoted `<` or `>` that is not a `<(` / `>(`. The digits or `{name}` in front of the operator (`2>`, `{fd}>`) and the `&` of `&>` stay with it; an operator run
+  (`>>`, `>|`, `<<<`, `&>>`) is not cut inside; a backslash-escaped `\>` is a letter of the word.
+- **`${..}`** is ONE word part (`_param_brace_end`: unquoted braces, nesting, a backslash takes the next character), and a blank inside it makes the word "spaced" as a quoted blank does. `${ cmd; }` and `${|cmd;}`
+  (bash 5.3 function substitutions, card 8ed4c8e8) are NOT word parts: a blank or a bar right after `${` leaves them to the old reading.
+- **`command_index` and `_after_wrapper`**: a redirection between an option and its value (`env -u >f X rm`, `exec -a >f nm rm`, `timeout -s >f KILL 5 rm`, `xargs -I >f {} rm`) is taken out before the value is skipped.
+
+Measured (real bash with a canary directory, Sam's 317 shapes of s1 to s3, `lp-935f`): holes 108 on 935f702c, **14** on this head. The 14 belong to two other cards: `cat <(rm ..)` and `echo >(rm ..)` (the process
+substitution body, e766e16c) and twelve `>$((1 + 1)) rm` targets (the `$(` cut of the segmenter, card 46f43d1a). Shapes that bash does not run and the gate refuses: 15 -> 26; the eleven new ones are
+`<${X:+a b} rm`-like (an input redirection from a file that does not exist: the shell stops, the gate cannot know). Corpus price (OLD = 935f702c from its own worktree, 34,588 unique Bash commands):
+33,075 allowed on both, 1,507 denied on both, **0 newly allowed, 6 newly denied**, all six the same: a python heredoc with a line like `if dd>10: ...` (a variable named dd). The gate reads the body lines of an
+interpreter heredoc as shell segments too, and `if dd > 10:` with blanks was refused on 935f702c already; the glued spelling now follows it (dd is a forbidden command name). Mutants
+(`deecccda-mutants/mutants_6b631f69_r2.py`): 14, 13 killed; the survivor (the `|` in the operator-run pattern) is equivalent: the pattern is only asked when a `<` or `>` is met, and a `|` in front of one
+belongs to an operator that is already inside the run. Tests: `destructive-gate.test.py` 2,497 rows (2,393 + 104), `git-config-programs` and `git-hook-switch` pass.
+
+Named limits: a glued `<(` or `>(` (`cat<(ls)`) stays one word (bash itself reports a syntax error there); the commands INSIDE a process substitution are card e766e16c. An unterminated `${` stays as before.
+The python-heredoc `if dd>10` false deny above is the old line-as-shell reading of interpreter bodies, not changed here.
 
 # A heredoc body handed on to a shell or an interpreter (card 6a6191f4)
 
