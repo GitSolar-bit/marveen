@@ -1876,20 +1876,35 @@ rule, so the real command name was never met. A `${..}` with a blank in it (`>${
 Three changes, all in the token reading:
 - **`_token_spans`** cuts a word at an unquoted `<` or `>` that is not a `<(` / `>(`. The digits or `{name}` in front of the operator (`2>`, `{fd}>`) and the `&` of `&>` stay with it; an operator run
   (`>>`, `>|`, `<<<`, `&>>`) is not cut inside; a backslash-escaped `\>` is a letter of the word.
-- **`${..}`** is ONE word part (`_param_brace_end`: unquoted braces, nesting, a backslash takes the next character), and a blank inside it makes the word "spaced" as a quoted blank does. `${ cmd; }` and `${|cmd;}`
-  (bash 5.3 function substitutions, card 8ed4c8e8) are NOT word parts: a blank or a bar right after `${` leaves them to the old reading.
+- **`${..}`** is ONE word part (`_param_brace_end`: unquoted braces, nesting, a backslash takes the next character). `${ cmd; }` and `${|cmd;}`
+  (bash 5.3 function substitutions, card 8ed4c8e8) are NOT word parts: a blank or a bar right after `${` leaves them to the old reading. (The first version also marked such a word as "spaced", like a
+  quoted blank; that was wrong, see round 3 below.)
 - **`command_index` and `_after_wrapper`**: a redirection between an option and its value (`env -u >f X rm`, `exec -a >f nm rm`, `timeout -s >f KILL 5 rm`, `xargs -I >f {} rm`) is taken out before the value is skipped.
 
 Measured (real bash with a canary directory, Sam's 317 shapes of s1 to s3, `lp-935f`): holes 108 on 935f702c, **14** on this head. The 14 belong to two other cards: `cat <(rm ..)` and `echo >(rm ..)` (the process
 substitution body, e766e16c) and twelve `>$((1 + 1)) rm` targets (the `$(` cut of the segmenter, card 46f43d1a). Shapes that bash does not run and the gate refuses: 15 -> 26; the eleven new ones are
 `<${X:+a b} rm`-like (an input redirection from a file that does not exist: the shell stops, the gate cannot know). Corpus price (OLD = 935f702c from its own worktree, 34,588 unique Bash commands):
-33,075 allowed on both, 1,507 denied on both, **0 newly allowed, 6 newly denied**, all six the same: a python heredoc with a line like `if dd>10: ...` (a variable named dd). The gate reads the body lines of an
+33,075 allowed on both, 1,507 denied on both, **0 newly allowed, 6 newly denied**, all six the same kind: a python heredoc with a line that glues a comparison to a variable named dd (`if dd>10: ...`; one of the six is `if dd<=7`). The gate reads the body lines of an
 interpreter heredoc as shell segments too, and `if dd > 10:` with blanks was refused on 935f702c already; the glued spelling now follows it (dd is a forbidden command name). Mutants
 (`deecccda-mutants/mutants_6b631f69_r2.py`): 14, 13 killed; the survivor (the `|` in the operator-run pattern) is equivalent: the pattern is only asked when a `<` or `>` is met, and a `|` in front of one
 belongs to an operator that is already inside the run. Tests: `destructive-gate.test.py` 2,497 rows (2,393 + 104), `git-config-programs` and `git-hook-switch` pass.
 
 Named limits: a glued `<(` or `>(` (`cat<(ls)`) stays one word (bash itself reports a syntax error there); the commands INSIDE a process substitution are card e766e16c. An unterminated `${` stays as before.
 The python-heredoc `if dd>10` false deny above is the old line-as-shell reading of interpreter bodies, not changed here.
+
+## Round 3 of card 6b631f69: an unquoted `${X:-rm -rf x}` is a command built by an expansion (Sam, 3ff20e4d)
+
+Round 2 made `${..}` one word and, with a blank inside it, flagged the word as "spaced" (the quoted-blank flag). Both hid a command from the rule of card 8ed4c8e8 (a command word built by an expansion is
+refused): `${X:-rm -rf x}`, `${X:- rm} -rf x`, `${X:=..}`, `${X-..}`, behind `nohup`, `env`, `if`, `time`, an assignment, a separator, with a tab for the blank, nested (`${X:-${Y:-rm} -rf x}`) and the git
+push form ran in bash (X unset: the expansion is word-split) and were refused on 935f702c. The reason is not the flag alone: `_bare_expansion_flags`, which tells the rule which token holds an expansion, still
+split the text at the blanks inside the braces, so its list was longer than the token list and the rule stayed silent (it needs both lists to agree).
+
+Two changes: the "spaced" flag for a `${..}` word is gone (the shell word-splits an UNQUOTED expansion; only a quoted blank is inert), and `_bare_expansion_flags` reads a `${..}` as one word exactly as
+`_token_spans` does (same `_param_brace_end`, same function-substitution exception), so the two lists agree again.
+
+Measured: Sam's regression list (`lp-3ff2` s4 and s5, 106 shapes, real bash with a canary directory) and the 317 of round 2: no shape that bash runs and the previous head refused is allowed any more; the remaining
+runs-and-allowed shapes belong to other cards (`case` arms bdcfa13a, process substitution body e766e16c, `>$((..))` and `x=${X:-$(echo a)}b` targets 46f43d1a). Tests: `destructive-gate.test.py` 2,526 rows (2,497 + 29:
+14 shapes with their real-bash fixtures and refusals, two units). Price and mutants: see the commit message.
 
 # A heredoc body handed on to a shell or an interpreter (card 6a6191f4)
 

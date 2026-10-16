@@ -2022,8 +2022,6 @@ def _token_spans(seg):
             if j >= 0:                         # a parameter expansion is ONE word part, blanks and `>` inside it included (`>${X:-a b} rm`)
                 if wstart is None:
                     wstart = i
-                if re.search(r'[ \t]', seg[i:j + 1]):
-                    had_space = True
                 cur.append(seg[i:j + 1])
                 i = j + 1
                 continue
@@ -2291,6 +2289,16 @@ def _bare_expansion_flags(seg):
     state = _quote_map(text)
     flags, cur, exp, i, n = [], False, False, 0, len(text)
     bdepth = 0                                 # inside a `${ ... }`: a slash there is text of the expansion, not a directory border (card 8ed4c8e8 round 3)
+    inword = set()                             # offsets inside a `${..}` that _token_spans reads as ONE word part: a blank there does not end the word (card 6b631f69 round 3)
+    k = 0
+    while k < n:
+        if state[k] == 0 and text.startswith('${', k) and text[k + 2:k + 3] not in ('', ' ', '\t', '|'):
+            e = _param_brace_end(text, state, k + 2)
+            if e >= 0:
+                inword.update(range(k, e + 1))
+                k = e + 1
+                continue
+        k += 1
     while i < n:
         ch = text[i]
         if state[i] != 1:
@@ -2304,7 +2312,7 @@ def _bare_expansion_flags(seg):
                 bdepth += 1
             elif bdepth and ch == '}':
                 bdepth -= 1
-        if not state[i] and ch in ' \t':
+        if not state[i] and ch in ' \t' and i not in inword:
             if cur:
                 flags.append(exp)
                 cur, exp = False, False

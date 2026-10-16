@@ -3043,8 +3043,30 @@ check("_token_spans: a word is cut at an unquoted < or >, the fd digits, {name} 
       [[t[0] for t in gate._token_spans(c)] for c in ("nohup>f rm", "rm&>f -rf x", "cat a&>f", "a 2>&1 b", ">f>g rm", "x=<y rm", "rm \\>x", ">${X:-a b} rm", "a>>f b", "{fd}>f rm", "a<<<x b")]
       == [["nohup", ">f", "rm"], ["rm", "&>f", "-rf", "x"], ["cat", "a", "&>f"], ["a", "2>&1", "b"], [">f", ">g", "rm"], ["x=", "<y", "rm"], ["rm", "\\>x"],
           [">${X:-a b}", "rm"], ["a", ">>f", "b"], ["{fd}>f", "rm"], ["a", "<<<x", "b"]])
-check("_token_spans: a ${ cmd; } function substitution is not a word part, a ${..} with a blank is flagged as holding one",
-      [gate._token_spans(c)[0][0] for c in ("${ }rm", "${ cmd; }x")] == ["${", "${"] and gate._token_spans("x=${Y:-a b}")[0][1] is True)
+check("_token_spans: a ${ cmd; } function substitution is not a word part, a ${..} with a blank is one word and NOT flagged as a quoted blank (an unquoted expansion is word-split by the shell)",
+      [gate._token_spans(c)[0][0] for c in ("${ }rm", "${ cmd; }x")] == ["${", "${"] and gate._token_spans("x=${Y:-a b}")[0][1] is False)
+_EXP6B = [
+    ("a whole command line as the default", "${X:-MARK}"),
+    ("a default that only names the command", "${X:- RMG} -rf nothere"),
+    ("the = form", "${X:=MARK}"),
+    ("the no-colon form", "${X-MARK}"),
+    ("behind nohup", "nohup ${X:-MARK}"),
+    ("behind an assignment", "x=1 ${X:-MARK}"),
+    ("after a separator", "echo a; ${X:-MARK}"),
+    ("behind env", "env ${X:-MARK}"),
+    ("behind if", "if ${X:-MARK}; then :; fi"),
+    ("behind time", "time ${X:-MARK}"),
+    ("a tab as the blank", "${X:-rm\t-rf\tnothere}"),
+    ("the name in the default, the options outside", "${X:-RMG -rf} nothere"),
+    ("a nested default", "${X:-${Y:-RMG} -rf nothere}"),
+    ("git push as the default", "${X:-git push --force origin x}"),
+]
+for _lab, _t in _EXP6B:
+    _ran = _real_bash_runs_cmd(_t.replace("RMG", "rm"))
+    check("6b631f69 r3 fixture is real (bash runs the command): %s" % _lab, _ran is None or _ran)
+    check("6b631f69 r3 refused: %s" % _lab, blocks_cwd(_t.replace("RMG", RM).replace("MARK", _RMX).replace("nothere", GROOT + "/backups"), GROOT))
+check("_bare_expansion_flags: a ${..} with blanks is ONE word, as the tokenizer reads it",
+      [gate._bare_expansion_flags(c) for c in ("${X:-${Y:-rm} -rf T}", "${X:-rm -rf T} a", "a ${X:- b} c", "${ cmd; }x y")] == [[True], [True, False], [False, True, False], [True, False, False, False]])
 check("_token_spans: a `<(` or `>(` glued to a word is not cut (bash reports a syntax error there; the process substitution itself is card e766e16c)",
       [[t[0] for t in gate._token_spans(c)] for c in ("cat<(ls)", "echo a>(ls)")] == [["cat<(ls)"], ["echo", "a>(ls)"]])
 check("_param_brace_end: the closing brace, a nested one and a quoted or escaped one do not count",
