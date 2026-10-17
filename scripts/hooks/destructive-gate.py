@@ -1958,6 +1958,14 @@ def _case_pass(text, state, out):
             if end < 0:
                 continue                                      # still inside the pattern list (`a|b)` was cut at its `|`)
             pat = None
+            arm = st + end + 1
+            while arm < len(text) and text[arm] in ' \t\n':
+                arm += 1
+            opaque = _opaque_substitution(text[arm:]) if OPAQUE_COMMAND_BLOCK else None    # the arm's first word is read from the arm, not from the `case x in x)` head in front of it
+            if opaque:
+                block('A parancsnev behelyettesitesbol jon (%s): a kapu a szoveget latja, nem azt, ami '
+                      'kifejtes utan fut, ezert nem tudja eldonteni, MI a parancs, es nem engedi at. '
+                      'Ird ki a parancs nevet.' % opaque)
             body = seg[end + 1:]
             if body.strip():
                 queue.insert(0, (body.strip(), st + end + 1 + len(body) - len(body.lstrip())))
@@ -1994,10 +2002,29 @@ def _case_pass(text, state, out):
     return res
 
 
+def _arm_cut(text, state, a, b):
+    """Start of the command position behind the last unquoted `)` in text[a:b], or a. In a case statement the segment in front of a glued `$(` still holds
+    the head and the pattern list (`case x in x) x=`): the `)` that ends the pattern is where the arm's command begins, so what is in front of the
+    substitution is judged from there (`case x in x) x=$(echo) rm ..` ran rm like `x=$(echo) rm ..` does; card bdcfa13a round 2)."""
+    k, cut = a, a
+    while k < b:
+        if state[k]:
+            k += 1
+            continue
+        if text[k] == '\\':
+            k += 2
+            continue
+        if text[k] == ')':
+            cut = k + 1
+        k += 1
+    return cut
+
+
 def segments_pos(text):
     """segments(), de minden szegmenshez a KEZDO-OFFSETJE is a szovegben (DAFB69DB: kell hozza, hogy egy szegmensrol
     megmondjuk, interpreter-torzsben (python3 - <<PY) all-e)."""
     state = _quote_map(text)
+    has_case = bool(re.search(r'\bcase\b', text))
     parts, start, i = [], 0, 0
     borders = set()                        # the `)` that closes a `$(` in an assignment or a redirection target: a command may follow it (card 46f43d1a)
     tails = set()                          # segment starts right behind such a `)`: the glued rest of the value comes first, then the command (round 2)
@@ -2016,12 +2043,13 @@ def segments_pos(text):
             continue
         hit = next((d for d in DELIMS if text.startswith(d, i)), None)
         ws = _glued_tail_end(text, state, start, i) if start in tails else start
-        if hit == '$(' and ((start in tails and ws >= i) or _command_still_to_come(text[ws:i])):
+        cs = _arm_cut(text, state, ws, i) if has_case else ws          # the command position of a case arm starts behind the `)` of its pattern
+        if hit == '$(' and ((start in tails and ws >= i) or _command_still_to_come(text[cs:i])):
             close = _matching_paren(text, state, i + 2)
             if close >= 0:
                 borders.add(close)
         if hit is None and text.startswith('${', i) and text[i + 2:i + 3] in (' ', '\t', '\n', '|') \
-                and ((start in tails and ws >= i) or _command_still_to_come(text[ws:i])):
+                and ((start in tails and ws >= i) or _command_still_to_come(text[cs:i])):
             close = _matching_brace(text, state, i + 2)       # a function substitution is a command list: its body is cut like `$(..)`, the `}` is a border
             if close >= 0:
                 borders.add(close)
@@ -2048,7 +2076,7 @@ def segments_pos(text):
             p, st = p[cut:], st + cut
         if p.strip():
             out.append((p.strip(), st + len(p) - len(p.lstrip())))
-    if re.search(r'\bcase\b', text):
+    if has_case:
         return _case_pass(text, state, out)
     return out
 

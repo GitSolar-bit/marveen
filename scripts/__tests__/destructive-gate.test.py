@@ -3231,6 +3231,50 @@ check("command_index: eleven wrappers are followed, a chain of twelve and more i
       gate.command_index(gate._bare_tokens("command " * 11 + "ls")) == 11 and blocks("command " * 12 + "ls") and blocks("command " * 13 + "ls"))
 
 # ---------------------------------------------------------------------------------------------------------------------------
+print("bdcfa13a round 2 -- the first word of a case arm built by a substitution or a backtick is judged like the same word at the top level (Sam 2026):")
+_CASEOP = [
+    ("a substitution inside the word", "r$(echo)m -rf TGT"),
+    ("a substitution as the word", "$(echo rm) -rf TGT"),
+    ("a backtick inside the word", "r`echo`m -rf TGT"),
+    ("a substitution with a colon command", "r$(:)m -rf TGT"),
+    ("a quoted word with a substitution", "\"r$(echo)m\" -rf TGT"),
+    ("an assignment with an empty substitution in front", "x=$(echo) rm -rf TGT"),
+    ("an assignment with a function substitution in front", "x=${ echo; } rm -rf TGT"),
+    ("two assignments with an empty substitution in front", "a=1 x=$(echo) rm -rf TGT"),
+    ("a substitution behind command", "command r$(echo)m -rf TGT"),
+    ("a substitution behind env", "env r$(echo)m -rf TGT"),
+    ("a substitution behind a redirection", ">/dev/null r$(echo)m -rf TGT"),
+    ("a git command named by a substitution", "g$(echo)it push --force origin x"),
+]
+_CASEWRAP = [
+    ("a first arm", "case x in x) %s;; esac"),
+    ("glued to the parenthesis", "case x in x)%s;; esac"),
+    ("a parenthesised pattern", "case x in (x) %s;; esac"),
+    ("a second arm", "case x in a) true;; x) %s;; esac"),
+    ("behind a fall-through terminator", "case x in x) true;& y) %s;; esac"),
+    ("on the next line", "case x in\n  x)\n    %s\n  ;;\nesac"),
+    ("behind an alternation", "case x in a|x) %s;; esac"),
+    ("inside an if", "if true; then case x in x) %s;; esac; fi"),
+    ("inside a function", "f() { case x in x) %s;; esac; }; f"),
+    ("a nested case", "case x in x) case y in y) %s;; esac;; esac"),
+    ("no terminator before esac", "case x in x) %s; esac"),
+]
+for _la, _body in _CASEOP:
+    _top = _body.replace("TGT", GROOT + "/backups")
+    check("bdcfa13a r2 precondition, the same word at the top level is refused: %s" % _la, blocks_cwd(_top, GROOT))
+    for _lw, _w in _CASEWRAP:
+        _t = _w % _body
+        _ran = _real_bash_runs_cmd(_t.replace("TGT", "nothere"))
+        check("bdcfa13a r2 fixture is real (bash runs it): %s, %s" % (_la, _lw), _ran is None or _ran or "git push" in _t)
+        check("bdcfa13a r2 refused: %s, %s" % (_la, _lw), blocks_cwd(_t.replace("TGT", GROOT + "/backups"), GROOT))
+for _q in ["case x in x) echo $(date);; esac", "case x in x) echo r$(echo)m;; esac", "case x in x) ls \"$(pwd)\";; esac", "case x in x) cd $(dirname /tmp/a);; esac",
+           "case x in a) echo a;; b) echo $(ls);; esac", "case x in x) echo `date`;; esac", "case x in x) y=$(echo a); ls;; esac",
+           "case x in x) y=$(echo a) ls;; esac", "case x in x) echo $(echo $(date));; esac", "case x in x) if true; then echo $(ls); fi;; esac",
+           "case \"$(uname)\" in Linux) echo $(uname -r);; esac", "case x in x) git log --oneline $(git rev-parse HEAD);; esac",
+           "case x in x) echo \")\" y=$(echo a) " + RM + " -rf " + GROOT + "/backups;; esac"]:      # a quoted parenthesis behind the pattern does not start a new command position
+    check("bdcfa13a r2 stays quiet (the substitution is an argument or a value): %r" % _q, not blocks_cwd(_q, GROOT))
+
+# ---------------------------------------------------------------------------------------------------------------------------
 print("6a6191f4 -- a heredoc body handed on to a shell or an interpreter is a PROGRAM (cat <<EOF | sh), not data:")
 _HD_BODY = RM + " -rf " + GROOT + "/backups"
 
