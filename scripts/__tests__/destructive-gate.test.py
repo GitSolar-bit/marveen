@@ -3113,6 +3113,80 @@ check("_bare_tokens: an unescaped parenthesis is a blank, an escaped one is a le
       and gate._bare_tokens("echo '\\(' rm") == [("echo", False), ("\\ ", True), ("rm", False)])      # inside quotes a backslash is no escape: the old reading stays
 
 # ---------------------------------------------------------------------------------------------------------------------------
+print("bdcfa13a -- the commands behind a case pattern are commands (case x in x) rm -rf <dir>;; esac ran rm and the gate read the whole arm as one word):")
+_CASEX = [
+    ("a first arm", "case x in x) MARK;; esac"),
+    ("the catch-all pattern", "case x in *) MARK ;; esac"),
+    ("a parenthesised pattern", "case x in (x) MARK;; esac"),
+    ("the fall-through terminator", "case x in x) MARK;& y) ;; esac"),
+    ("a variable word", "case $X in *) MARK ;; esac"),
+    ("a second arm", "case x in a) true;; x) MARK;; esac"),
+    ("an alternation", "case x in a|x) MARK;; esac"),
+    ("the last arm behind an alternation", "case x in a|b) true;; *) MARK;; esac"),
+    ("an extglob pattern", "shopt -s extglob\ncase x in @(a|x)) MARK;; esac"),
+    ("newlines", "case x in\n  x) MARK\n  ;;\nesac"),
+    ("behind another command", "case x in x) true; MARK;; esac"),
+    ("inside an if", "if true; then case x in x) MARK;; esac; fi"),
+    ("inside a group", "{ case x in x) MARK;; esac; }"),
+    ("inside a subshell", "(case x in x) MARK;; esac)"),
+    ("inside a function", "f() { case x in x) MARK;; esac; }; f"),
+    ("a nested case", "case x in x) case y in y) MARK;; esac;; esac"),
+    ("the test-next terminator", "case x in x) true;;& *) MARK;; esac"),
+    ("inside a loop", "for i in 1; do case $i in 1) MARK;; esac; done"),
+    ("behind a substitution in the arm", "case x in x) y=$(echo a); MARK;; esac"),
+    ("a quoted word and pattern", "case \"x\" in \"x\") MARK;; esac"),
+    ("behind a pipe", "echo hi | case x in x) MARK;; esac"),
+    ("glued to the parenthesis", "case x in x)MARK;; esac"),
+    ("behind command", "case x in x) command MARK;; esac"),
+    ("in a while condition", "while case x in x) MARK;; esac; do break; done"),
+    ("behind a bang", "case x in x) ! MARK;; esac"),
+    ("behind time", "case x in x) time MARK;; esac"),
+    ("no terminator before esac", "case x in x) MARK; esac"),
+    ("esac on the next line", "case x in x) MARK\nesac"),
+    ("behind env", "case x in x) env MARK;; esac"),
+    ("a quoted alternation", "case x in 'a b'|x) MARK;; esac"),
+    ("a bracket pattern", "case x in [a-z]) MARK;; esac"),
+    ("in a group in the arm", "case x in x) { MARK; };; esac"),
+    ("in a subshell in the arm", "case x in x) (MARK);; esac"),
+    ("in an if in the arm", "case x in x) if true; then MARK; fi;; esac"),
+    ("in a nested shell in the arm", "case x in x) bash -c 'MARK';; esac"),
+    ("after an empty arm and esac", "case x in x) ;; esac; MARK"),
+    ("behind a second case", "case x in x) true;; esac; case y in y) MARK;; esac"),
+    ("a quoted parenthesis in the pattern", "case \")\" in \")\") MARK;; esac"),
+    ("an escaped parenthesis in the pattern", "case \")\" in \\)) MARK;; esac"),
+    ("a nested head behind blanks, a quoted parenthesis in its pattern", "case x in x)    case \")\" in \")\") MARK;; esac;; esac"),
+    ("an escaped parenthesis in an alternation", "case x in \\)|x) MARK;; esac"),
+    ("git push --force in an arm", "case x in x) GPUSH;; esac"),
+    ("git push --force in a later arm", "case x in a) true;; *) GPUSH;; esac"),
+]
+for _lab, _t in _CASEX:
+    _ran = _real_bash_runs_cmd(_t)
+    check("bdcfa13a fixture is real (bash runs the command): %s" % _lab, _ran is None or _ran)
+    check("bdcfa13a refused: %s" % _lab, blocks_cwd(_t.replace("MARK", _RMX).replace("GPUSH", "git push --force origin x"), GROOT))
+_CASEQ = ["case \"$1\" in start) echo up;; stop) echo down;; *) echo usage;; esac", "case x in x) echo a;; esac", "case x in a|b) ls /tmp;; *) echo none;; esac",
+          "case x in\n  a) echo a ;;\n  b) echo b ;;\nesac", "case \"$X\" in *.txt) echo t;; esac", "case x in x) echo \"case y in z) rm -rf q;; esac\";; esac",
+          "echo case x in x", "grep -n case file.txt", "case x in (a|b) echo ab;; (x) echo x;; esac", "case x in x) ls; pwd;; esac", "git log --grep=case",
+          "case x in x) ;; esac", "case x in esac) echo e;; esac", "case \"$(uname)\" in Linux) echo l;; *) echo o;; esac",
+          "python3 - <<'PY'\nprint(1)\ncase 1: pass\nPY", "shopt -s extglob\ncase x in @(a|b)) echo ab;; esac", "case x in \")\") echo p;; esac",
+          "case x in \\)) echo p;; esac",
+          "case x in x) echo a; esac", "case x in x) echo a\nesac"]
+for _q in _CASEQ:
+    check("bdcfa13a stays quiet: %r" % _q, not blocks_cwd(_q, GROOT))
+check("bdcfa13a named: an arm that bash does not run is judged like a top-level command (fixture: bash does not run it)",
+      _real_bash_runs_cmd("case x in y) MARK;; esac") is False and blocks_cwd("case x in y) " + _RMX + ";; esac", GROOT))
+for _lab, _t in (("an unclosed statement", "case x in x) ls"), ("a substitution in a pattern list", "case x in a$(ls)) ls;; esac"),
+                 ("a bare parenthesis in a pattern", "case x in a(b)) ls;; esac"), ("a substitution as the word", "case $(uname) in Linux) echo l;; esac"),
+                 ("a backtick as the word", "case `uname` in Linux) echo l;; esac"), ("no head", "case"), ("no in", "case x of y) ls;; esac"),
+                 ("an operator in front of a pattern list", "case x in || a) ls;; esac")):
+    check("bdcfa13a named, a shape the reading does not hold with certainty is refused: %s" % _lab, blocks_cwd(_t, GROOT))
+check("segments_pos: the head and the pattern lists are dropped, the arm commands are segments of their own",
+      [s for s, _o in gate.segments_pos("case x in a|b) ls;; (c) rm -rf X;; *) pwd;; esac")] == ["ls", "rm -rf X", "pwd"])
+check("segments_pos: a statement behind esac and an if around it",
+      [s for s, _o in gate.segments_pos("if true; then case x in x) ls;; esac; fi; echo ok")] == ["if true", "ls", "fi", "echo ok"])
+check("segments_pos: nested statements", [s for s, _o in gate.segments_pos("case x in x) case y in y) ls;; esac;; z) pwd;; esac")] == ["ls", "pwd"])
+check("segments_pos: no case word, no change", [s for s, _o in gate.segments_pos("echo a; ls | wc")] == ["echo a", "ls", "wc"])
+
+# ---------------------------------------------------------------------------------------------------------------------------
 print("6a6191f4 -- a heredoc body handed on to a shell or an interpreter is a PROGRAM (cat <<EOF | sh), not data:")
 _HD_BODY = RM + " -rf " + GROOT + "/backups"
 

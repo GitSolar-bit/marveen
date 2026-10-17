@@ -1881,6 +1881,119 @@ def _glued_tail_end(text, state, a, b):
     return min(k, b)
 
 
+# a `case` statement is not one command: after `in` and after every `;;` / `;&` / `;;&` comes a PATTERN LIST that ends with a `)`, and what follows that `)` is a
+# command position of its own (`case x in x) rm -rf <dir>;; esac` ran rm and the gate read `x` as the command of the whole segment; card bdcfa13a)
+_ARM_SEPS = (';;', ';&', ';;&')
+_CASE_LEAD = ('if', 'then', 'elif', 'else', 'while', 'until', 'do', '!', '{', 'time')
+
+
+def _case_unsure(why):
+    block('A case-utasitas szerkezetet a kapu nem tudja bizonyithatoan vegigolvasni (%s), ezert nem engedi at: az agak parancsait ugyanugy meg kell nezni, mint a '
+          'felso szint parancsait. Ird kulon parancsokra vagy if/elif alakra.' % why)
+
+
+def _case_pass(text, state, out):
+    """The segments with the `case` structure taken out (card bdcfa13a, Sam 4553): the head `case WORD in` and the pattern lists are dropped, the commands
+    behind each pattern's closing `)` become segments of their own (so they get the verdict of a top-level command), `esac` closes the statement.
+
+    Inverted direction: a shape this reading does not hold with certainty is a deny, never an allow. Unsure is: a head without `case WORD in` in one segment
+    (a substitution or a backtick in the word), a delimiter inside a pattern list other than `|` (a `$(` or a backtick there would run), a bare parenthesis
+    in a pattern (not an extglob), and a statement that is not closed by the end of the text."""
+    res, queue, depth, pat, prev_end = [], list(out), 0, None, None
+    foreign = _foreign_code_ranges(_RAW_CMD) if len(_RAW_CMD) == len(text) else []    # the body of a python / node program is not shell text
+    while queue:
+        seg, st = queue.pop(0)
+        between = re.sub(r'\s+', '', text[prev_end:st]) if prev_end is not None else ''
+        prev_end = st + len(seg)
+        if foreign and any(a <= st < b for a, b in foreign):
+            res.append((seg, st))
+            continue
+        if depth and pat is None and between.endswith(_ARM_SEPS):
+            pat = {'depth': 0, 'started': False}
+        if pat is not None:
+            if pat['started']:
+                if between != '|':
+                    _case_unsure('a delimiter inside a pattern list')
+            elif between != '' and not between.endswith(_ARM_SEPS):
+                _case_unsure('a delimiter in front of a pattern list')
+            if not pat['started'] and seg.startswith('esac') and (len(seg) == 4 or seg[4] in ' \t\n;&|<>'):
+                depth -= 1
+                pat = None
+                rest = seg[4:]
+                if rest.strip():
+                    queue.insert(0, (rest.strip(), st + 4 + len(rest) - len(rest.lstrip())))
+                continue
+            end, o = -1, 0
+            while o < len(seg):
+                if state[st + o]:
+                    pat['started'] = True
+                    o += 1
+                    continue
+                ch = seg[o]
+                if ch == '\\':
+                    pat['started'] = True
+                    o += 2
+                    continue
+                if ch in ' \t\n':
+                    o += 1
+                    continue
+                if ch == '(':
+                    if pat['depth'] == 0 and not pat['started']:
+                        pat['started'] = True                 # the optional opening parenthesis of the arm: `(x) cmd`
+                    elif o > 0 and seg[o - 1] in '@*+?!':
+                        pat['depth'] += 1                     # an extglob: `@(a|b)`
+                    else:
+                        _case_unsure('a bare parenthesis in a pattern')
+                    o += 1
+                    continue
+                if ch == ')':
+                    if pat['depth']:
+                        pat['depth'] -= 1
+                        o += 1
+                        continue
+                    end = o
+                    break
+                pat['started'] = True
+                o += 1
+            if end < 0:
+                continue                                      # still inside the pattern list (`a|b)` was cut at its `|`)
+            pat = None
+            body = seg[end + 1:]
+            if body.strip():
+                queue.insert(0, (body.strip(), st + end + 1 + len(body) - len(body.lstrip())))
+            continue
+        # not inside a pattern list: the first command word, behind the keywords that may precede it
+        shift = 0
+        fm = _FUNC_HEAD.match(seg)
+        if fm:
+            shift = fm.end()
+        bare = seg[shift:].replace('(', ' ').replace(')', ' ')
+        spans = _token_spans(bare)
+        k = 0
+        while k < len(spans) and spans[k][0] in _CASE_LEAD and not spans[k][1]:
+            k += 1
+        if depth and k == 0 and spans and spans[0][0] == 'esac' and not spans[0][1]:
+            depth -= 1
+            rest = seg[shift + spans[0][3]:]
+            if rest.strip():
+                queue.insert(0, (rest.strip(), st + shift + spans[0][3] + len(rest) - len(rest.lstrip())))
+            continue
+        if k < len(spans) and spans[k][0] == 'case' and not spans[k][1]:
+            if k + 2 >= len(spans) or spans[k + 2][0] != 'in' or spans[k + 2][1]:
+                _case_unsure('no `case WORD in` head in one segment')
+            depth += 1
+            pat = {'depth': 0, 'started': False}
+            cut = shift + spans[k + 2][3]
+            rest = seg[cut:]
+            if rest.strip():
+                queue.insert(0, (rest.strip(), st + cut + len(rest) - len(rest.lstrip())))
+            continue
+        res.append((seg, st))
+    if depth or pat is not None:
+        _case_unsure('a case statement that is not closed')
+    return res
+
+
 def segments_pos(text):
     """segments(), de minden szegmenshez a KEZDO-OFFSETJE is a szovegben (DAFB69DB: kell hozza, hogy egy szegmensrol
     megmondjuk, interpreter-torzsben (python3 - <<PY) all-e)."""
@@ -1935,6 +2048,8 @@ def segments_pos(text):
             p, st = p[cut:], st + cut
         if p.strip():
             out.append((p.strip(), st + len(p) - len(p.lstrip())))
+    if re.search(r'\bcase\b', text):
+        return _case_pass(text, state, out)
     return out
 
 
