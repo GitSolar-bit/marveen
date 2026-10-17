@@ -1490,7 +1490,7 @@ _PLAIN_CMD_NAME = re.compile(r'^(?:/[\w./+-]+|[\w.+-]+)$')
 # PATH assigned anywhere in the command (`PATH=/tmp/x:$PATH python3 -c`, `export PATH=...`, `env PATH=...`, a `PATH=...;` statement): a bare tool
 # name then resolves to whatever the agent put there, so no NAME is evidence of the tool it names. An ASSIGNMENT is a `PATH=` word that stands
 # among the leading assignments / `export` / `env` / options of a statement; `echo PATH=1` is an argument.
-_ASSIGN_LEAD = frozenset(('export', 'env', 'declare', 'typeset', 'readonly', 'local', 'command', 'time', 'nice', 'nohup', 'timeout', 'exec', 'sudo'))
+_ASSIGN_LEAD = frozenset(('export', 'env', 'declare', 'typeset', 'readonly', 'local', 'command', 'builtin', 'time', 'nice', 'nohup', 'timeout', 'exec', 'sudo'))
 _path_assigned_cache = {}
 
 
@@ -1533,7 +1533,7 @@ def _anchored_tool(name, text):
 # Wrappers that run their trailing words as a command, and the options of each that TAKE a value (the next word is not the command).
 _C_WRAPPERS = {
     'env': {'-u', '-C', '--unset', '--chdir'}, 'time': {'-f', '-o', '--format', '--output'}, 'nice': {'-n', '--adjustment'},
-    'nohup': set(), 'timeout': {'-s', '-k', '--signal', '--kill-after'}, 'command': set(), 'exec': {'-a'},
+    'nohup': set(), 'timeout': {'-s', '-k', '--signal', '--kill-after'}, 'command': set(), 'builtin': set(), 'exec': {'-a'},
     'xargs': {'-I', '-n', '-P', '-d', '-L', '-s', '-E', '-a', '-l'},
 }
 
@@ -2221,7 +2221,7 @@ def _tokens(seg):
 _KEYWORDS = ('if', 'then', 'elif', 'else', 'fi', 'while', 'until', 'do', 'done',
              'case', 'esac', 'in', 'select', 'function', 'coproc',
              '!', '{', '}', '(', ')', '[[', ']]')
-_TRANSPARENT = ('exec', 'command', 'time', 'nohup', 'env', 'busybox', 'toybox')
+_TRANSPARENT = ('exec', 'command', 'builtin', 'time', 'nohup', 'env', 'busybox', 'toybox')
 # Az ertekuket KULON szoban hozo kapcsolok burkolonkent (a tobbi kapcsolo onallo).
 _TRANSPARENT_VALUE_OPTS = {
     'env': ('-C', '-u', '--chdir', '--unset'),
@@ -2559,7 +2559,10 @@ def command_index(toks):
             i = nxt
             continue
         return i
-    return None
+    # twelve keywords, assignments and wrappers in front of the command and still no command word: a chain this gate does not follow to its end is
+    # not allowed through (card f64fcef1, inverted direction; it was `return None`, the answer "there is no command")
+    block('Tizenkettonel tobb burkolo, kulcsszo es ertekadas egymas utan a parancsnev elott: a kapu nem tudja vegigkovetni, melyik a tenyleges parancs, '
+          'ezert nem engedi at. Ird egyszerubben.')
 
 
 def _sub_scripts(toks, idx):

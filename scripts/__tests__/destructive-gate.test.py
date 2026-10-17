@@ -3187,6 +3187,50 @@ check("segments_pos: nested statements", [s for s, _o in gate.segments_pos("case
 check("segments_pos: no case word, no change", [s for s, _o in gate.segments_pos("echo a; ls | wc")] == ["echo a", "ls", "wc"])
 
 # ---------------------------------------------------------------------------------------------------------------------------
+print("f64fcef1 -- builtin is a wrapper (builtin command rm, builtin exec rm), a wrapper chain is followed to its end, one that is not followed is refused:")
+_BUILTINX = [
+    ("builtin command", "builtin command MARK"),
+    ("builtin exec", "builtin exec MARK"),
+    ("command in front of builtin", "command builtin command MARK"),
+    ("builtin eval", "builtin eval 'MARK'"),
+    ("a built name behind builtin eval", "builtin eval 'r${X}m -rf nothere'"),
+    ("twelve wrappers and more", "command command command command command command command command command command command command command MARK"),
+    ("time in front", "time builtin command MARK"),
+    ("the end of options", "builtin -- command MARK"),
+    ("an assignment in front", "x=1 builtin command MARK"),
+    ("builtin twice", "builtin builtin command MARK"),
+    ("inside an if", "if true; then builtin command MARK; fi"),
+    ("command -p in front", "command -p builtin command MARK"),
+    ("alternating wrappers", "builtin command builtin command builtin command builtin command builtin command builtin command MARK"),
+    ("behind a separator", "echo a; builtin command MARK"),
+    ("behind &&", "true && builtin exec MARK"),
+    ("a redirection in the chain", "builtin command >/dev/null MARK"),
+    ("a nested eval", "builtin eval 'builtin command MARK'"),
+    ("git push --force", "builtin command GPUSH"),
+    ("git push --force behind exec", "builtin exec GPUSH"),
+]
+for _lab, _t in _BUILTINX:
+    _ran = _real_bash_runs_cmd(_t)
+    check("f64fcef1 fixture is real (bash runs the command): %s" % _lab, _ran is None or _ran)
+    check("f64fcef1 refused: %s" % _lab, blocks_cwd(_t.replace("MARK", _RMX).replace("GPUSH", "git push --force origin x"), GROOT))
+check("f64fcef1 refused: an option of command (the fixture runs the real rm: command -p ignores the fake PATH)",
+      blocks_cwd("builtin command -p " + _RMX, GROOT))
+check("f64fcef1: builtin in front of an interpreter -c program is read like command in front of it (the program is python text)",
+      not blocks_cwd("builtin python3 -c '" + _RMX + "'", GROOT) and not blocks_cwd("command python3 -c '" + _RMX + "'", GROOT))
+check("f64fcef1 refused: a PATH assignment behind builtin export makes the interpreter name no evidence of the tool",
+      blocks_cwd("builtin export PATH=/tmp/x:$PATH; python3 -c '" + _RMX + "'", GROOT))
+for _q in ("builtin cd /tmp", "builtin echo hi", "command -v rm", "builtin command -v rm", "builtin type rm", "builtin printf x", "command ls", "builtin command ls /tmp",
+           "command command command command command command command command command command ls", "builtin cd /tmp && builtin pwd", "builtin read -r x <<< hi",
+           "echo builtin command " + _RMX, "builtin command git status"):
+    check("f64fcef1 stays quiet: %r" % _q, not blocks_cwd(_q, GROOT))
+check("f64fcef1 named: builtin followed by an external command (bash: not a shell builtin, nothing runs) is judged like the command itself",
+      _real_bash_runs_cmd("builtin MARK") is False and blocks_cwd("builtin " + _RMX, GROOT))
+check("command_index: builtin is a wrapper, the command behind a chain of them",
+      [gate.command_index(gate._bare_tokens(c)) for c in ("builtin command rm -f x", "command builtin command rm", "builtin exec rm", "builtin cd x", "builtin -- rm")] == [2, 3, 2, 1, 2])
+check("command_index: eleven wrappers are followed, a chain of twelve and more is refused",
+      gate.command_index(gate._bare_tokens("command " * 11 + "ls")) == 11 and blocks("command " * 12 + "ls") and blocks("command " * 13 + "ls"))
+
+# ---------------------------------------------------------------------------------------------------------------------------
 print("6a6191f4 -- a heredoc body handed on to a shell or an interpreter is a PROGRAM (cat <<EOF | sh), not data:")
 _HD_BODY = RM + " -rf " + GROOT + "/backups"
 
