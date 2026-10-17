@@ -3073,6 +3073,46 @@ check("_param_brace_end: the closing brace, a nested one and a quoted or escaped
       [gate._param_brace_end(c, gate._quote_map(c), 2) for c in ("${a} b", "${a:-${b}} c", '${a:-"}"} d', "${a:-\\}} e", "${a")] == [3, 9, 8, 7, -1])
 
 # ---------------------------------------------------------------------------------------------------------------------------
+print("40650fd7 round 2 (Sam, lp-18b2 s2): an escaped blank, tab or parenthesis is a letter of its word, as an escaped separator is:")
+_ESCX = [
+    ("an escaped blank in the value", "x=a\\ b MARK"),
+    ("an escaped open parenthesis", "x=a\\(b MARK"),
+    ("an escaped close parenthesis", "x=a\\)b MARK"),
+    ("an escaped tab", "x=a\\\tb MARK"),
+    ("an escaped blank in a redirection target", ">a\\ b MARK"),
+    ("two escaped blanks in a second assignment", "FOO=a\\ b\\ c MARK"),
+    ("in a function body", "f() { x=a\\ b MARK; }; f"),
+    ("an escaped backslash and an escaped blank", "x=a\\\\\\ b MARK"),
+    ("an escaped blank behind a substitution", "x=$(echo a)\\ b MARK"),
+    ("an escaped blank behind a substitution and a letter", "x=$(echo a)b\\ c MARK"),
+    ("an escaped less-than in a redirection target", "2>a\\<b MARK"),
+    ("an escaped less-than", "x=a\\<b MARK"),
+    ("an escaped greater-than", "x=a\\>b MARK"),
+    ("git push behind an escaped blank", "x=a\\ b GPUSH"),
+    ("inside an if", "if true; then x=a\\ b MARK; fi"),
+    ("behind a separator", "echo a; x=a\\ b MARK"),
+]
+for _lab, _t in _ESCX:
+    _ran = _real_bash_runs_cmd(_t)
+    check("40650fd7 r2 fixture is real (bash runs the command): %s" % _lab, _ran is None or _ran)
+    check("40650fd7 r2 refused: %s" % _lab, blocks_cwd(_t.replace("MARK", _RMX).replace("GPUSH", "git push --force origin x"), GROOT))
+for _lab, _t in (("the escaped blank ends the value, rm becomes the value's word", "x=a\\ MARK"), ("the same with nothing before the blank", "x=\\ MARK")):
+    check("40650fd7 r2 fixture is real (bash does NOT run the command): %s" % _lab, _real_bash_runs_cmd(_t) is False)
+    check("40650fd7 r2 stays quiet: %s" % _lab, not blocks_cwd(_t.replace("MARK", _RMX), GROOT))
+for _q in ("x=a\\ b echo ok", "cp a\\ b c\\ d", "x=a\\ b python3 -c pass", "ls My\\ Documents", "echo a\\(b\\)c", "cat a\\ b | wc -l", "x=a\\ b; ls /tmp", "echo \\(" + _RMX + "\\)"):
+    check("40650fd7 r2 stays quiet: %r" % _q, not blocks_cwd(_q, GROOT))
+check("_token_spans: an escaped blank, tab or parenthesis stays in its word",
+      [t for t, _sp, _a, _b in gate._token_spans("x=a\\ b rm -rf X")] == ["x=a\\ b", "rm", "-rf", "X"]
+      and [t for t, _sp, _a, _b in gate._token_spans("x=a\\\tb rm")] == ["x=a\\\tb", "rm"]
+      and [t for t, _sp, _a, _b in gate._token_spans("x=a\\(b rm")] == ["x=a\\(b", "rm"])
+check("_token_spans: an escaped blank sets the quoted-blank flag, an escaped letter does not",
+      [sp for _t, sp, _a, _b in gate._token_spans("x=a\\ b y=a\\b")] == [True, False])
+check("_bare_tokens: an unescaped parenthesis is a blank, an escaped one is a letter",
+      [t for t, _sp in gate._bare_tokens("(rm -rf X)")] == ["rm", "-rf", "X"] and [t for t, _sp in gate._bare_tokens("x=a\\(b rm")] == ["x=a\\(b", "rm"]
+      and [t for t, _sp in gate._bare_tokens("x=a\\\\(b rm")] == ["x=a\\\\", "b", "rm"]
+      and gate._bare_tokens("echo '\\(' rm") == [("echo", False), ("\\ ", True), ("rm", False)])      # inside quotes a backslash is no escape: the old reading stays
+
+# ---------------------------------------------------------------------------------------------------------------------------
 print("6a6191f4 -- a heredoc body handed on to a shell or an interpreter is a PROGRAM (cat <<EOF | sh), not data:")
 _HD_BODY = RM + " -rf " + GROOT + "/backups"
 

@@ -2011,10 +2011,14 @@ def _token_spans(seg):
             cur.append(seg[i:b])
             i = b
             continue
-        if state[i] == 0 and ch == '\\' and i + 1 < len(seg) and seg[i + 1] in '<>&':
+        if not state[i] and ch == '\\' and i + 1 < len(seg):
+            # an unquoted backslash makes the next character a letter of the word, a blank or a tab as well (`x=a\\ b rm` is ONE assignment word and then rm;
+            # card 40650fd7 round 2)
             if wstart is None:
                 wstart = i
-            cur.append(seg[i:i + 2])           # an escaped `\>` is a letter of the word, not an operator (card 6b631f69 round 2)
+            if seg[i + 1] in ' \t':
+                had_space = True
+            cur.append(seg[i:i + 2])
             i += 2
             continue
         if state[i] == 0 and seg.startswith('${', i) and seg[i + 2:i + 3] not in ('', ' ', '\t', '|'):    # `${ cmd; }` and `${|cmd;}` are command substitutions (card 8ed4c8e8), not a word part
@@ -2146,7 +2150,18 @@ def _strip_funcdef(seg):
 
 
 def _bare_tokens(seg):
-    return [(t, sp) for t, sp in _tokens(seg.replace('(', ' ').replace(')', ' ')) if t]
+    """The words of a segment with the parentheses read as blanks. An ESCAPED parenthesis is a letter of its word (`x=a\\(b rm`, card 40650fd7 round 2),
+    so only an unquoted, unescaped one becomes a blank."""
+    state = _quote_map(seg)
+    out, i = [], 0
+    while i < len(seg):
+        if seg[i] == '\\' and not state[i] and i + 1 < len(seg):
+            out.append(seg[i:i + 2])
+            i += 2
+            continue
+        out.append(' ' if seg[i] in '()' else seg[i])
+        i += 1
+    return [(t, sp) for t, sp in _tokens(''.join(out)) if t]
 
 
 def _words_not_commands_at(text, top, A):
