@@ -526,6 +526,14 @@ def _heredoc_opener_runs_body(head):
         if any(_interp_family(t.strip('"\'')) is not None for t in re.split(r'[\s;&|(){}]+', head) if t):
             return True
     seg = re.split(r'\|\||&&|[;|&]', head)[-1]
+    # Card e766e16c: the opener may stand INSIDE a process substitution (`cat <(bash <<EOF`, `x=<(python3 - <<PY`): the command that reads the
+    # body is the one behind the LAST `<(` / `>(`, read by this same function; the whole-line reading below stays (it holds `sh <(cat <<EOF`,
+    # where the substitution is the program file), and the body is code when either reading says so.
+    m = None
+    for m in re.finditer(r'[<>]\(', seg):
+        pass
+    if m and _heredoc_opener_runs_body(seg[m.end():]):
+        return True
     toks = [t for t in re.split(r'\s+', seg.strip()) if t]
     k = 0
     while k < len(toks) and (re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', toks[k])
@@ -563,7 +571,7 @@ def _heredoc_opener_runs_body(head):
 _HEREDOC_OPEN = re.compile(r'<<-?\s*([\'"]?)([A-Za-z_][A-Za-z0-9_]*)\1')
 
 
-_CMD_CTX = frozenset(('top', 'sub', 'bt', 'par'))
+_CMD_CTX = frozenset(('top', 'sub', 'bt', 'par', 'fsub'))
 
 
 def _in_command_context(text, pos):
@@ -626,6 +634,10 @@ def _in_command_context(text, pos):
                     stack.pop()
                 i += 1
                 continue
+            if c == '}' and k == 'fsub':
+                stack.pop()
+                i += 1
+                continue
         if k != 'dq' and c == "'":                                  # a single quote is literal inside double quotes only
             j = text.find("'", i + 1)
             if j < 0 or j >= n:
@@ -654,7 +666,9 @@ def _in_command_context(text, pos):
                     i += 2
                 continue
             if d == '{':
-                stack.append('brace')
+                # `${ cmd; }` and `${|cmd;}` (bash 5.3 function substitution) are COMMAND lists, not a parameter expansion: `echo ${ ($(echo rm) ..); }`
+                # ran the expanded word (card 358a37db measured on the live gate); the brace that closes them pops below.
+                stack.append('fsub' if text[i + 2:i + 3] in (' ', '\t', '\n', '|') else 'brace')
                 i += 2
                 continue
             if d == '[':
@@ -2089,7 +2103,49 @@ def segments_pos(text):
         if p.strip():
             out.append((p.strip(), st + len(p) - len(p.lstrip())))
     if has_case:
-        return _case_pass(text, state, out)
+        out = _case_pass(text, state, out)
+    # Card e766e16c (Sam 4577): the INSIDE of a process substitution `<(..)` / `>(..)` is a command list of its own that bash runs wherever the
+    # substitution stands (an argument, an assignment value, a `[[ ]]` operand, a `for` word, a case pattern, glued to a word, bare). The outer
+    # segment keeps the `<(..)` as one word (the readers of `sh <(cat <<EOF`, `x=<(echo) rm` and `source <(..)` stand on that), and the inside is
+    # ADDED as segments of its own, read like the top level (`$(`, `;`, `|`, a newline, `case` and a nested substitution cut it the same way), placed
+    # right behind the segment that holds the opener. A quoted or escaped `<(` is text (`echo "<(rm ..)"`, `cat \<(..)` is a syntax error), an
+    # unclosed one is read to the end (a deny costs nothing: bash refuses the text).
+    extra, skip = [], -1
+    for o, a, close in _psub_openers(text, state):
+        if o < skip:
+            continue                                   # inside a substitution already read: its recursion holds the nested one
+        b = close if close >= 0 else len(text)
+        skip = b
+        if text[a:b].strip():
+            extra.extend((s, a + p) for s, p in segments_pos(text[a:b]))
+    if extra:
+        seen = set(out)                                # a function substitution in a value position is cut by the border logic above already: the same segment at the same offset is not added twice
+        out = sorted(out + [e for e in extra if e not in seen], key=lambda sp: sp[1])
+    return out
+
+
+def _psub_openers(text, state):
+    """[(offset of the opener, offset where its body starts, offset of the closing `)` / `}` or -1)] of every substitution in text whose inside is a
+    COMMAND LIST that no delimiter cuts: a process substitution `<(..)` / `>(..)` (unquoted, its `<`/`>` not escaped: an even number of unquoted
+    backslashes in front, so `\\\\<(..)` is a backslash and a substitution, `\\<(..)` is text), and a function substitution `${ cmd; }` / `${|cmd;}`
+    (bash 5.3; `echo ${ rm -rf <dir>; }` ran rm on the live gate: as an argument the body stayed inside one word). `<<(`, `>>(` and `<<<(` are
+    syntax errors to bash; they are reported here as well (a deny on a text bash refuses costs nothing)."""
+    out, i = [], 0
+    while i + 1 < len(text):
+        if not state[i] and text[i] in '<>' and text[i + 1] == '(' and not state[i + 1]:
+            n, k = 0, i - 1
+            while k >= 0 and text[k] == '\\' and not state[k]:
+                n += 1
+                k -= 1
+            if n % 2 == 0:
+                out.append((i, i + 2, _matching_paren(text, state, i + 2)))
+                i += 2
+                continue
+        if not state[i] and text.startswith('${', i) and text[i + 2:i + 3] in (' ', '\t', '\n', '|') and (i == 0 or text[i - 1] != '\\'):
+            out.append((i, i + 3 if text[i + 2] == '|' else i + 2, _matching_brace(text, state, i + 2)))
+            i += 2
+            continue
+        i += 1
     return out
 
 
@@ -4656,11 +4712,25 @@ def _scan_dq(text, i, out, region=False):
             body = text[i + 2:e]
             if re.search(r"(^|[\s;&|(])case\s", body):
                 raise _SubstUnprovable("a case statement inside $(...)")
+            if text.startswith("$((", i):
+                # An arithmetic expansion is handed over WHOLE (`$(( ($(date +%s)-t)/86400 ))`; _subst_end already closed both parentheses), not as
+                # the bare `(..)`: without its opener the inner `(` read as a subshell whose first word is a substitution and was refused (card
+                # 358a37db; four recorded fleet commands have this shape). The nested `$(..)` in it is still cut and judged by the recursion's own
+                # segment reading, so `"$(( (rm -rf x) ))"` stays refused.
+                out.append(text[i:e + 1])
+                i = e + 1
+                continue
             out.append(body)
             i = e + 1
             continue
         if ch == "$" and text.startswith("${", i):
             e = _brace_end(text, i + 2)
+            if text[i + 2:i + 3] in (' ', '\t', '\n', '|'):
+                # `"${ cmd; }"` / `"${|cmd;}"` (bash 5.3 function substitution): the body is a command list that RUNS, like a `"$(..)"`; it goes to the
+                # recursion whole (card e766e16c: `echo "${ rm -rf <dir>; }"` ran on the live gate). A parameter expansion keeps the region scan below.
+                out.append(text[i + 3 if text[i + 2] == '|' else i + 2:e])
+                i = e + 1
+                continue
             _scan_dq(text[i + 2:e], 0, out, True)
             i = e + 1
             continue
@@ -4709,6 +4779,21 @@ def dq_subst_programs(cmd):
         block('Idezojelen belul allo parancs-behelyettesites, amit a kapu nem tud biztosan kivagni (%s): a $(...) vagy `...` '
               'tartalma FUT, ezert vizsgalat nelkul nem engedhetem at. Nem az ugynok dontese.' % exc)
     return [p for p in out if p.strip()]
+
+
+def funsub_programs(cmd):
+    """The bodies of the UNQUOTED function substitutions `${ cmd; }` / `${|cmd;}` (bash 5.3) in a command, each a shell program of its own for
+    check_bash (card e766e16c). Their inside gets segments of its own already (segments_pos), but the shell reader's proof of the real command
+    (_proof_of) reads a `${..}` as one WORD, so the rules that stand on that proof (the command name built by an expansion: `echo ${ ${X}rm ..; }`,
+    `${ {rm,-rf,x}; }`, `${ r$(echo)m ..; }` ran on the live gate) did not fire inside it; at the top level of a recursion they do. The double-quoted
+    form goes through dq_subst_programs."""
+    data, code = _heredoc_body_ranges(cmd)
+    text = _blank_ranges(cmd, data)
+    text = _blank_ranges(text, _comment_ranges(text, code))
+    text = _blank_ranges(text, _foreign_code_ranges(cmd))
+    state = _quote_map(text)
+    return [text[a:(close if close >= 0 else len(text))] for o, a, close in _psub_openers(text, state)
+            if text.startswith('${', o) and text[a:(close if close >= 0 else len(text))].strip()]
 
 
 _PE_SIMPLE = {'a': 7, 'b': 8, 'e': 27, 'E': 27, 'f': 12, 'n': 10, 'r': 13, 't': 9, 'v': 11, '\\': 92}
@@ -5225,6 +5310,26 @@ def _open_of(text, state, k):
     return -1
 
 
+def _arith_paren_group(text, k):
+    """Is the `(` at text[k] a parenthesis INSIDE an arithmetic command `(( .. ))`: the chain of `(` in front of it, blanks between, ends in a `((`
+    that is not a `<((` / `>((` (a subshell inside a process substitution)? `(( ($(x)) ))` is arithmetic, no command is named in it; `( ($(echo rm) ..) )`
+    is a subshell in a subshell and runs the expanded word (card 358a37db)."""
+    j = k - 1
+    while j >= 0 and text[j] in ' \t':
+        j -= 1
+    if j < 0 or text[j] != '(':
+        return False
+    if j >= 1 and text[j - 1] == '(' and not (j >= 2 and text[j - 2] in '<>'):
+        return True
+    return _arith_paren_group(text, j)
+
+
+def _backtick_opens(text, state, i):
+    """Is the backtick at text[i] an OPENING one? Backticks pair up from the start of the text: the one with an even number of unescaped,
+    not single-quoted backticks in front of it opens a command list, the next one closes it (card 358a37db)."""
+    return sum(1 for q in range(i) if text[q] == '`' and state[q] != 1 and (q == 0 or text[q - 1] != '\\')) % 2 == 0
+
+
 def _walk_back(text, state, w, dollar_brace_is_word):
     """(offset of the border in front of w, the text between that border and w with each CLOSED group stepped over replaced by `X`). A closed
     `$(..)`, `(..)` or `${ .. }` in front of the word is one word of the prefix (`x=$(echo) r$(echo)m`: the prefix is `x=$X r`, the command is `r..`), not a
@@ -5237,6 +5342,20 @@ def _walk_back(text, state, w, dollar_brace_is_word):
                 cuts.append((o, k))
                 k = o - 1
                 continue
+        if state[k] != 1 and text[k] == '`' and (k == 0 or text[k - 1] != '\\'):
+            # Card 358a37db: a backtick is a border or a closed group, by its parity. An OPENING one (an even number of backticks in front)
+            # starts a command list: `` echo `r$(echo)m -rf x` `` has the prefix `r`, and r..m is the command. A CLOSING one ends a group that is one
+            # word of the prefix, like a closed `$(..)`: `` x=`date` r$(echo)m `` has the prefix `x=X r`; `` echo `date` r$(echo)m `` has `echo X r`.
+            if _backtick_opens(text, state, k):
+                break
+            o = k - 1
+            while o >= 0 and not (text[o] == '`' and state[o] != 1 and (o == 0 or text[o - 1] != '\\')):
+                o -= 1
+            if o < 0:
+                break
+            cuts.append((o, k))
+            k = o - 1
+            continue
         if _border_at(text, state, k) and not (dollar_brace_is_word and text[k] == '{' and k and text[k - 1] == '$'):
             break
         k -= 1
@@ -5254,6 +5373,8 @@ def _opaque_substitution(text):
     state = _quote_map(text)
     for i, ch in enumerate(text):
         if ch == '`':
+            if not _backtick_opens(text, state, i):
+                continue                               # a CLOSING backtick is not a substitution (card 358a37db: the back-walk now stops at an opening one)
             w = i
         elif ch == '$' and text.startswith('$(', i) and not text.startswith('$((', i):
             w = i
@@ -5269,10 +5390,23 @@ def _opaque_substitution(text):
         if w > 0 and text[w - 1] not in ' \t;&|\n':
             # `x=$(..)`, `($(..)`, `echo foo$(..)`: not a word of its own, nothing to say. But `r$(echo m) -rf x`: a substitution glued to a literal in
             # front, in the BASENAME of the word that is the command, is the command named by an expansion (card 8ed4c8e8).
+            if ch != '`' and text[w - 1] == '`' and not state[w - 1]:
+                return text[w:w + 30].strip()          # `` `$(echo rm) -rf x` ``: the substitution is the first word of the backtick's command list (card e766e16c, neighbour)
             k, gprefix = _walk_back(text, state, w, True)
-            if k >= 1 and text[k] == '(' and text[k - 1] in '($':
-                if text[k - 1] == '(':
-                    continue                           # inside (( )) / $(( )): arithmetic, no command is named there
+            if k >= 1 and text[k] == '(' and text[k - 1] == '(' and not (k >= 2 and text[k - 2] in '<>' and not state[k - 2]):
+                continue                               # inside (( )) / $(( )): arithmetic, no command is named there (`<((..))` is a subshell inside a process substitution)
+            if k >= 0 and text[k] == '(' and not state[k] and not gprefix.strip():
+                # Card e766e16c, neighbour class: the substitution is the FIRST word behind a group opener: a subshell `($(echo rm) -rf x)`, a nested
+                # substitution `echo $($(echo rm) ..)`, a process substitution `cat <($(echo rm) ..)`, a backtick `` (`echo rm` -rf x) ``. Bash runs the
+                # expanded word as the command of that list; the back-walk stopped at the opener with an EMPTY prefix, and an empty glued prefix was read
+                # as "not a word of its own, nothing to say" (a `( $(..)` with a blank in front went the other way and was refused).
+                # Not where no command is read: inside `$(( ))` / `$[ ]` / `${ }` / quotes (`echo $(( ($(date +%s)-t)/86400 ))` is arithmetic, four
+                # recorded fleet commands have that shape), and the inner parenthesis of an arithmetic command `(( ($(x)) ))`.
+                # A process substitution opens a command list wherever it stands (`echo ${X:-<($(echo rm) ..)}` runs it inside a parameter
+                # expansion, where the context walker sees a word): its `(` is command context by definition.
+                psub = k >= 1 and text[k - 1] in '<>' and not state[k - 1]
+                if psub or (_in_command_context(text, k) and not _arith_paren_group(text, k)):
+                    return text[w:w + 30].strip()
             if state[w] == 2 and gprefix.count('"') % 2 == 1 and gprefix.count("'") % 2 == 0 and not _has_separator(gprefix):
                 gprefix += '"'                         # the quote is the one the word opened: close it, the prefix is then read like any other
             if gprefix.count('"') % 2 or gprefix.count("'") % 2 or _has_separator(gprefix):
@@ -6191,7 +6325,7 @@ def _check_bash(cmd, _depth=0, cwd=None):
     # ezert ha barhol allt benne `cd`, a munkakonyvtar nem eldontheto -- None.
     for payload in interpreter_payloads(cmd):
         check_payload(payload, _depth, None if saw_cd else entry_cwd)
-    for code in shell_stdin_programs(cmd) + dq_subst_programs(cmd):
+    for code in shell_stdin_programs(cmd) + dq_subst_programs(cmd) + funsub_programs(cmd):
         if code == cmd:
             continue
         if _depth >= _MAX_NEST:

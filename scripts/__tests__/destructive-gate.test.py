@@ -3901,7 +3901,149 @@ check("_built_by_expansion: the flag list and the span list disagree (a glued <)
 check("segments_pos: the `)` that closes a process substitution in an assignment is a border, the command behind it is its own segment",
       [s for s, _p in gate.segments_pos("x=<(echo $(date)) r${X}m -f x")][-1] == "r${X}m -f x"
       and [s for s, _p in gate.segments_pos("cat <(echo $(date)) r${X}m")][-1] != "r${X}m"
-      and [s for s, _p in gate.segments_pos("diff <(ls) <(ls)")] == ["diff <(ls) <(ls)"])
+      and [s for s, _p in gate.segments_pos("diff <(ls) <(ls)")] == ["diff <(ls) <(ls)", "ls", "ls"])    # the outer segment keeps the substitutions as words; the two insides are segments of their own since card e766e16c
+
+print()
+print("e766e16c -- the inside of a process substitution <(..) / >(..) is a command list that bash runs wherever the substitution stands (Sam 4577):")
+# the body inside the substitution (MARK = the fake rm on PATH, GPUSH = the fake git push; r${X}m and $(echo rm) expand to the fake rm as well)
+_BODYE7 = ["MARK", "x=1 MARK", "2>&1 MARK", ">/dev/null MARK", "r${X}m -rf TGT", "${X}rm -rf TGT", "$(echo rm) -rf TGT", "`echo rm` -rf TGT", "eval MARK",
+           "command MARK", "echo a; MARK", "echo a | MARK", "true && MARK", "echo a\nMARK", "for i in 1; do MARK; done", "case x in x) MARK;; esac",
+           "{ MARK; }", "(MARK)", "f() { MARK; }; f", "MARK # note\n", "echo ')'; MARK", "GPUSH"]
+# where the substitution stands (the outer command)
+_POSE7 = [("an argument", "cat <(%s)"), ("an output substitution", "echo >(%s)"), ("the second argument", "diff <(ls) <(%s)"), ("tee", "tee >(%s) </dev/null"),
+          ("an assignment value", "x=<(%s)"), ("an assignment value in front of a command", "x=<(%s) ls"), ("an export value", "export X=<(%s)"),
+          ("a declare value", "declare x=<(%s)"), ("an array value", "a=(<(%s))"), ("a [[ ]] operand", "[[ a == <(%s) ]]"), ("a [ ] operand", "[ a = <(%s) ]"),
+          ("a for word", "for i in <(%s); do :; done"), ("a case pattern", "case x in <(%s)) :;; esac"), ("a parameter default", "echo ${X:-<(%s)}"),
+          ("bare", "<(%s)"), ("behind a colon", ": <(%s)"), ("glued behind a word", "cat x<(%s)"), ("glued in front of a word", "cat <(%s)x"),
+          ("behind a double-quoted word", 'echo "a"<(%s)'), ("behind a single-quoted word", "echo 'a'<(%s)"), ("glued behind a word with >(", "echo x>(%s)"),
+          ("a redirection target", "echo hi > >(%s)"), ("a stderr target", "echo hi 2> >(%s)"), ("a stdin source", "cat < <(%s)"), ("an exec fd", "exec 3< <(%s)"),
+          ("a read source", "read -r x < <(%s)"), ("a while-read source", "while read -r l; do :; done < <(%s)"), ("in the background", "cat <(%s) &\nwait"),
+          ("in a function", "f() { cat <(%s); }; f"), ("in a brace group", "{ cat <(%s); }"), ("in a subshell", "( cat <(%s) )"), ("an if condition", "if cat <(%s); then :; fi"),
+          ("inside a substitution", "echo $(cat <(%s))"), ("inside a quoted substitution", 'cat "$(cat <(%s))"'), ("inside a backtick", "echo `cat <(%s)`"),
+          ("inside a quoted word", 'echo "x$(cat <(%s))"'), ("nested in another one", "cat <(cat <(%s))"), ("behind an env prefix", "X=1 cat <(%s)"),
+          ("behind command", "command cat <(%s)"), ("behind builtin", "builtin echo <(%s)"), ("behind exec", "exec cat <(%s)"), ("behind time", "time cat <(%s)"),
+          ("behind a negation", "! cat <(%s)"), ("behind coproc", "coproc cat <(%s)"), ("behind a tab", "cat\t<(%s)"), ("an assignment word in front of true", "cmd=<(%s) true"),
+          ("glued to the command name", "c<(%s) x"), ("behind a heredoc operator", "cat <<EOF <(%s)\nx\nEOF"), ("with blanks inside", "cat <( %s )"),
+          ("on its own lines", "cat <(\n%s\n)"), ("the second of two", "cat <(echo a) <(%s)"), ("after a semicolon", "ls; cat <(%s)"), ("after a pipe", "echo | cat <(%s)")]
+# Where nothing opens the substitution's pipe (a value, a `[[ ]]` operand, a pattern, bare, a word nobody reads), the FIRST write into it kills the inside
+# with SIGPIPE before the body reaches its destructive command (measured: `x=<(echo a; rm ..)` never runs rm, `x=<(rm ..)` does). The bodies that write
+# first are therefore not a bash fixture in those positions; the gate must refuse them all the same (the destructive command may come first).
+_NOREADER_E7 = {"an assignment value", "an export value", "a declare value", "a local value", "an array value", "a [[ ]] operand", "a [ ] operand", "a for word",
+                "a case pattern", "a parameter default", "bare", "behind a colon", "behind a double-quoted word", "behind a single-quoted word", "behind builtin",
+                "an assignment word in front of true", "glued to the command name", "an exec fd"}
+_WRITES_FIRST_E7 = {"2>&1 MARK", "echo a; MARK", "echo a\nMARK", "echo ')'; MARK"}
+for _bd in _BODYE7:
+    for _lw, _w in _POSE7:
+        if _lw == "inside a backtick" and "`" in _bd:
+            continue                                   # a backtick inside a backtick closes it: not the shape under test
+        if _lw == "behind a heredoc operator" and "\n" in _bd:
+            continue                                   # a substitution that spans the heredoc opener line is the class of card 7214aedb (open on all heads, see below)
+        _t = _w % _bd
+        if not (_lw in _NOREADER_E7 and _bd in _WRITES_FIRST_E7):
+            _ran = _real_bash_runs_cmd(_t.replace("TGT", "nothere"))
+            check("e766e16c fixture is real (bash runs the inside): %s %r" % (_lw, _t), _ran is None or _ran or "GPUSH" in _t)
+        check("e766e16c refused: %s %r" % (_lw, _t), blocks_cwd(_t.replace("MARK", RM + " -rf TGT").replace("GPUSH", "git push --force origin x").replace("TGT", GROOT + "/backups"), GROOT))
+# Named neighbour, NOT this card's class (card 7214aedb: an expansion left open on the heredoc opener line continues on the next line, the body starts later):
+# `cat <<EOF <(echo a<NL>rm -rf X)<NL>x<NL>EOF` runs rm (measured) and the heredoc reader blanks the second line as data. The `$(..)` form of it is refused.
+_T7214 = "cat <<EOF <(echo a\n" + RM + " -rf TGT)\nx\nEOF"
+check("7214aedb neighbour is recorded as open (the $(..) form of it is refused; this pin flips when card 7214aedb closes it)",
+      blocks_cwd(_T7214.replace("<(", "$(").replace("TGT", GROOT + "/backups"), GROOT))
+for _q in ["diff <(ls) <(ls -a)", "cat <(echo a)", "comm -3 <(sort a.txt) <(sort b.txt)", "paste <(cut -f1 x.tsv) <(cut -f2 x.tsv)",
+           'while read -r l; do echo "$l"; done < <(ls)', "tee >(gzip > out.gz) < in.txt", "cat <(grep -v foo file.txt)", "git diff --no-index <(cat a) <(cat b)",
+           "diff <(git log --oneline -n 3) <(git log --oneline -n 3 origin/main)", "x=<(echo) ls", "exec 3< <(printf '%s\\n' a b)", "jq -s . <(echo 1) <(echo 2)",
+           "sort <(cat x.txt) <(cat y.txt)", "wc -l <(ls /tmp)", "cat <(ls /tmp | head -3)", 'cat <(echo "rm is a word here")',
+           'echo "<(' + RM + ' -rf TGT)"', "echo '<(" + RM + " -rf TGT)'", "cat <<EOF\n<(" + RM + " -rf TGT)\nEOF", "cat <<'EOF'\n<(" + RM + " -rf TGT)\nEOF",
+           'echo "\\<(' + RM + ' -rf TGT)"', 'cat <(echo "<(' + RM + ' -rf TGT)")', "cat <(echo '" + RM + " -rf TGT')", "cat <(cat <<'EOF'\n" + RM + " -rf TGT\nEOF\n)",
+           "(ls)", "(echo $(date))", "(x=1 ls)", "echo $(ls) `date`"]:
+    check("e766e16c stays quiet (a plain inside, or the substitution is text): %r" % _q, not blocks_cwd(_q.replace("TGT", GROOT + "/backups"), GROOT))
+check("segments_pos: the inside of a process substitution is a segment of its own, placed behind the segment that holds the opener",
+      gate.segments_pos("cat <(" + RM + " -f x)") == [("cat <(" + RM + " -f x)", 0), (RM + " -f x", 6)]
+      and gate.segments_pos("cat <(cat <(" + RM + " -f x))") == [("cat <(cat <(" + RM + " -f x))", 0), ("cat <(" + RM + " -f x)", 6), (RM + " -f x", 12)]
+      and [s for s, _p in gate.segments_pos("cat <(echo a; " + RM + " -f x) && ls")] == ["cat <(echo a", "echo a", RM + " -f x)", RM + " -f x", "ls"])
+check("segments_pos: a quoted or escaped <( is text, an escaped backslash in front is not an escape, an unclosed one is read to the end",
+      gate.segments_pos('echo "<(' + RM + ' -f x)"') == [('echo "<(' + RM + ' -f x)"', 0)]
+      and gate.segments_pos("cat \\<(" + RM + " -f x)") == [("cat \\<(" + RM + " -f x)", 0)]
+      and gate.segments_pos("cat \\\\<(" + RM + " -f x)") == [("cat \\\\<(" + RM + " -f x)", 0), (RM + " -f x", 8)]
+      and gate.segments_pos("cat <(" + RM + " -f x") == [("cat <(" + RM + " -f x", 0), (RM + " -f x", 6)])
+# The heredoc OPENER may stand inside the substitution: the command that reads the body is the one behind the last `<(` / `>(`
+# (`cat <(bash <<EOF` read `cat` as the command and the body as data; the real bash runs the body).
+for _lw, _w in [("an argument", "cat <(%s)"), ("an output substitution", "echo >(%s)"), ("an assignment value", "x=<(%s)"), ("a [[ ]] operand", "[[ a == <(%s) ]]"),
+                ("a for word", "for i in <(%s); do :; done"), ("nested in another one", "cat <(cat <(%s))"), ("behind an env prefix", "X=1 cat <(%s)")]:
+    for _bd in ["bash <<EOF\nMARK\nEOF\n", "sh -s <<EOF\nMARK\nEOF\n", "bash - <<EOF\nMARK\nEOF\n", "x=1 bash <<EOF\nMARK\nEOF\n", "cat <<EOF | bash\nMARK\nEOF\n"]:
+        _t = _w % _bd
+        _ran = _real_bash_runs_cmd(_t.replace("TGT", "nothere"))
+        check("e766e16c fixture is real (bash runs the heredoc body inside the substitution): %s %r" % (_lw, _t), _ran is None or _ran)
+        check("e766e16c refused (a heredoc body run by a shell inside the substitution): %s %r" % (_lw, _t), blocks_cwd(_t.replace("MARK", RM + " -rf " + GROOT + "/backups"), GROOT))
+for _q in ["cat <(cat <<EOF\nhello\nEOF\n)", "cat <(cat <<'EOF'\n" + RM + " -rf TGT\nEOF\n)", "diff <(sort a) <(sort b) <<EOF\nx\nEOF", 'cat <(echo "<(bash)") <<EOF\ndata\nEOF',
+           "x=<(cat <<EOF\n" + RM + " -rf TGT\nEOF\n) ls", "cat <(bash script.sh <<EOF\n" + RM + " -rf TGT\nEOF\n)"]:
+    check("e766e16c stays quiet (the heredoc inside the substitution is data): %r" % _q, not blocks_cwd(_q.replace("TGT", GROOT + "/backups"), GROOT))
+check("_heredoc_opener_runs_body: the command behind the last <( decides, the whole-line reading is kept",
+      gate._heredoc_opener_runs_body("cat <(bash ") and gate._heredoc_opener_runs_body("x=<(python3 - ") and gate._heredoc_opener_runs_body("sh <(cat ")
+      and not gate._heredoc_opener_runs_body("cat <(cat ") and not gate._heredoc_opener_runs_body("cat <(bash script.sh ") and not gate._heredoc_opener_runs_body("cat > f "))
+check("_psub_openers: every unquoted, unescaped <( and >( with its body start and closing parenthesis, and the function substitutions with their brace",
+      gate._psub_openers("cat <(a) >(b) \"<(c)\" \\<(d) \\\\<(e)", gate._quote_map("cat <(a) >(b) \"<(c)\" \\<(d) \\\\<(e)")) == [(4, 6, 7), (9, 11, 12), (29, 31, 32)]
+      and gate._psub_openers("echo ${ ls; } ${|ls;} ${X:-y}", gate._quote_map("echo ${ ls; } ${|ls;} ${X:-y}")) == [(5, 7, 12), (14, 17, 20)])
+# A function substitution `${ cmd; }` / `${|cmd;}` (bash 5.3) is a command list as well: as an argument its body stayed inside one word and
+# `echo ${ rm -rf <dir>; }` ran rm on the live gate (measured with the canary); a glued substitution as its first word is the 358a37db class inside it.
+for _lw, _w in [("an argument", "echo ${ %s; }"), ("a pipe-form argument", "echo ${| %s; }"), ("an assignment value", "x=${ %s; }"), ("a quoted argument", 'echo "${ %s; }"'),
+                ("the second of two", "echo ${ date; } ${ %s; }"), ("inside a process substitution", "cat <(${ %s; })")]:
+    for _bd in ["MARK", "x=1 MARK", "echo a; MARK", "($(echo rm) -rf TGT)", "(`echo rm` -rf TGT)", "GPUSH", "${X}rm -rf TGT", "r$(echo)m -rf TGT", "{rm,-rf,TGT}"]:
+        # (the last three: a command name built by an expansion inside the body; the rule for it stands on the shell reader's proof, which reads a
+        # `${..}` as one word, so the unquoted body is also handed to the recursion by funsub_programs)
+        _t = _w % _bd
+        _ran = _real_bash_runs_cmd(_t.replace("TGT", "nothere"))
+        check("e766e16c fixture is real (bash runs the function substitution's body): %s %r" % (_lw, _t), _ran is None or _ran or "GPUSH" in _t)
+        check("e766e16c refused (the body of a function substitution is read): %s %r" % (_lw, _t),
+              blocks_cwd(_t.replace("MARK", RM + " -rf TGT").replace("GPUSH", "git push --force origin x").replace("TGT", GROOT + "/backups"), GROOT))
+# (`echo ${ date; } ${ ls; }`, two function substitutions in one command, is refused on the rebased 30500dad head already: an older limit, not touched here.)
+for _q in ["echo ${ date; }", "x=${ ls /tmp; }", 'echo "${ echo hi; }"', "echo ${| echo hi; }", "echo ${X:-y} ${#X} ${X%%/*}", "echo '${ " + RM + " -rf x; }'", 'x="${ date; }"']:
+    check("e766e16c stays quiet (a plain function substitution, or a parameter expansion): %r" % _q, not blocks_cwd(_q, GROOT))
+check("funsub_programs: the bodies of the unquoted function substitutions, the double-quoted one is left to dq_subst_programs, a parameter expansion is none",
+      gate.funsub_programs('echo ${ ls; } ${|date;} "${ id; }" ${X:-y}') == [' ls; ', 'date;'] and gate.dq_subst_programs('echo "${ id; }"') == [' id; '])
+check("_in_command_context: a function substitution is command context, a parameter expansion is not",
+      gate._in_command_context("echo ${ (", 8) and gate._in_command_context("echo ${|(", 8) and not gate._in_command_context("echo ${X:-(", 10)
+      and not gate._in_command_context("echo ${ a; } ${X:-(", 18) and gate._in_command_context("echo ${ a; } (", 13))
+
+print()
+print("e766e16c neighbour -- a substitution glued to a group opener is the FIRST word of that command list (a subshell, a nested substitution, a backtick, a process substitution):")
+_GBODY = ["$(echo rm) -rf TGT", "`echo rm` -rf TGT", "$(echo git) push --force origin x", "r$(echo)m -rf TGT"]
+_GPOS = [("a subshell", "(%s)"), ("a subshell after a semicolon", "ls; (%s)"), ("a subshell in a group", "{ (%s); }"), ("a subshell as an if condition", "if (%s); then :; fi"),
+         ("a subshell function body", "f() (%s); f"), ("a subshell in the background", "(%s) &\nwait"), ("a subshell after an arithmetic command", "((1)); (%s)"),
+         ("a subshell with the word on its own line", "(\n%s\n)"), ("a subshell inside a substitution", "$( (%s) )"), ("a nested substitution at the top", "$(%s)"),
+         ("a nested substitution as an argument", "echo $(%s)"), ("a nested substitution as a value", "x=$(%s)"), ("a nested substitution in double quotes", 'echo "$(%s)"'),
+         ("inside a backtick", "echo `%s`"), ("inside a backtick behind a closed backtick group", "echo `date` `%s`"),
+         ("inside a backtick behind a closed backtick group with a trailing blank", "echo `date ` `%s`"),    # the opening backtick must be a BORDER: read as a closer it glues `date ` to the prefix
+         ("inside a process substitution", "cat <(%s)"), ("inside an output substitution", "echo >(%s)"),
+         ("a subshell inside a process substitution", "cat <((%s))"), ("a spaced subshell inside a process substitution", "cat <( (%s) )"),
+         ("a subshell in a pipe", "(%s) | cat"), ("a subshell after &&", "true && (%s)"), ("a subshell with a redirection", "(%s) >/dev/null")]
+for _bd in _GBODY:
+    for _lw, _w in _GPOS:
+        if _lw.startswith("inside a backtick") and "`" in _bd:
+            continue                                   # a backtick inside a backtick closes it: not the shape under test
+        _t = _w % _bd
+        _ran = _real_bash_runs_cmd(_t.replace("TGT", "nothere"))
+        check("e766e16c neighbour fixture is real (bash runs the expanded word): %s %r" % (_lw, _t), _ran is None or _ran or "git" in _t)
+        check("e766e16c neighbour refused: %s %r" % (_lw, _t), blocks_cwd(_t.replace("TGT", GROOT + "/backups"), GROOT))
+# (`(( $(echo 1) + 1 ))` and `echo $(( $(echo 1) + 1 ))` are refused on the live gate and on every chain head already, by the spaced branch of the
+# same rule: an older named limit, not touched here.)
+for _q in ["echo $((1+1))", "(( 1 + 1 ))", "(echo $(date))", "( ls $(pwd) )", "cat <(echo $(date))", "echo `date`", "echo $(echo $(date))", "echo \"$(echo $(date))\"",
+           "echo `date` r$(echo)m", "echo `date` `ls`", "x=`date`; echo $x", "echo `date`r$(echo)m", "echo '`' r$(echo)m", "echo \\` r$(echo)m", "x=`date`", "echo `date` `ls` `pwd`",
+           "echo `echo `date``", 'echo "`date`" r$(echo)m', "echo `date ` r$(echo)m", "echo `date ` `ls`"]:
+    check("e766e16c neighbour stays quiet (arithmetic, a closed backtick in front, or the substitution is an argument): %r" % _q, not blocks_cwd(_q, GROOT))
+# Arithmetic is not a command list: `$(( ($(date +%s)-t)/86400 ))` (four recorded fleet commands), in and out of double quotes, and the inner parenthesis of an
+# arithmetic command `(( ($(x)) ))` stay quiet; a double-quoted arithmetic expansion is handed to the recursion WHOLE (with its `$((`), so its context is kept and a
+# command inside it is still refused. (`$(( $(x) ))` with a blank is refused on every head by the older spaced branch: a named limit, not touched.)
+for _q in ['echo $(( ($(date +%s)-t)/86400 ))', 'x=$(( ($(date +%s)-t)/86400 ))', 'echo "$(( ($(date +%s)-t)/86400 ))d $f"', 'echo "$(($(date +%s)-1))"', '(( ($(echo 1)) ))',
+           '(( ( ($(echo 1)) ) ))', 'while read t f; do echo "$(( ($(date +%s)-t)/86400 ))d $f"; done < x.txt', 'echo $[ ($(date +%s)-1) ]', 'x=$[ ($(date +%s)-t)/86400 ]']:
+    check("358a37db stays quiet (arithmetic holds no command): %r" % _q, not blocks_cwd(_q, GROOT))
+for _x in ['echo "$(( (' + RM + ' -rf TGT) ))"', 'x="$(( (' + RM + ' -rf TGT)+1 ))"', 'echo "$(( 1 + $(' + RM + ' -rf TGT) ))"', 'echo "x$(' + RM + ' -rf TGT)"']:
+    check("358a37db refused (a command inside a double-quoted arithmetic expansion is still read): %r" % _x, blocks_cwd(_x.replace("TGT", GROOT + "/backups"), GROOT))
+check("dq_subst_programs: an arithmetic expansion is handed over whole, a command substitution as its body",
+      gate.dq_subst_programs('echo "$(( ($(date +%s)-t)/86400 ))d" "$(ls)"') == ['$(( ($(date +%s)-t)/86400 ))', 'ls'])
+check("_arith_paren_group: the chain of ( in front ends in a (( that is not <((",
+      [gate._arith_paren_group(t, t.rindex("(")) for t in ("(( (", "(( ( (", "( (", "cat <(( (", "<((", "$(( (", "x (")] == [True, True, False, False, False, True, False])
+check("_backtick_opens: backticks pair up from the start, an escaped or single-quoted one does not count",
+      [gate._backtick_opens(t, gate._quote_map(t), t.rindex("`")) for t in ("echo `date`", "echo `", "x=`a` `", "echo \\` `", "echo '`' `", 'echo "`a`" `')] == [False, True, True, True, True, True])
 
 print()
 print("30500dad -- eval joins the EXPANDED words into a command line, source runs what a process substitution prints (Sam 4157):")
