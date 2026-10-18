@@ -3931,6 +3931,61 @@ check("_dynamic_in: what the shell expands before it uses the words is found, a 
       [bool(gate._dynamic_in(t, gate._quote_map(t), 0, len(t))) for t in ('"$(a)"', "`a`", '"${a}"', "$a", '"$1"', "$@", "$'a'", "<(a)", "'$(a)'", "'`a`'", '\\$(a)', '"\\$a"', "a $ b", "a$", "plain", '"a"')]
       == [True, True, True, True, True, True, True, True, False, False, False, False, False, False, False, False])
 
+# ---------------------------------------------------------------------------------------------------------------------------
+print("coproc NAME -- the name of a coprocess is not the command (found while measuring part 5 of the class of card 30500dad, Sam 4877):")
+_BODY_CP = ["coproc X { MARK; }; wait", "coproc X { true; MARK; }; wait", "coproc X ( MARK ); wait", "coproc X while true; do MARK; break; done; wait", "coproc X if true; then MARK; fi; wait",
+            "coproc { MARK; }; wait", "coproc X { eval \"$(echo MARK)\"; }; wait", "coproc X { source <(echo MARK); }; wait", "coproc _x1 { MARK; }; wait",
+            "coproc X {\nMARK\n}; wait", "coproc X { MARK ; } 2>/dev/null; wait"]
+_WRAP_CP = [("at the top level", "%s"), ("behind a separator", "echo a; %s"), ("in a brace group", "{ %s\n}"), ("in an if", "if true; then %s\nfi"), ("in a subshell", "( %s\n)")]
+for _bd in _BODY_CP:
+    for _lw, _w in _WRAP_CP:
+        _t = _w % _bd
+        _ran = _real_bash_runs_cmd(_t)
+        check("coproc fixture is real (bash runs it): %s %r" % (_lw, _t), _ran is None or _ran)
+        check("coproc refused: %s %r" % (_lw, _t), blocks_cwd(_t.replace("MARK", "rm -rf " + GROOT + "/backups"), GROOT))
+for _q in ["coproc X { echo hi; }; wait", "coproc echo hi; wait", "coproc cat; wait", "coproc X { true; }; wait", "coproc X ( ls /tmp ); wait", "coproc X while false; do :; done; wait",
+           "coproc NAME_ONLY", "echo coproc X { true; }"]:
+    check("coproc stays quiet: %r" % _q, not blocks_cwd(_q, GROOT))
+check("command_index: `coproc NAME {` names the coprocess, the command is behind the brace; `coproc NAME` alone and `coproc cmd` keep the word as the command",
+      [gate.command_index(gate._bare_tokens(s)) for s in ("coproc X { rm -f x", "coproc X ( rm -f x", "coproc X while true", "coproc { rm -f x", "coproc rm -f x", "coproc X rm -f x")]
+      == [3, 3, 3, 2, 1, 1])
+
+# ---------------------------------------------------------------------------------------------------------------------------
+print("30500dad part 3 and 6 -- source of a descriptor, of stdin fed by something other than a literal here-document, of a locale- or ANSI-quoted file (Sam 4877):")
+_BODY_SF = ["source /dev/stdin < <(echo MARK)", ". /dev/fd/0 < <(echo MARK)", "source /proc/self/fd/0 < <(echo MARK)", "exec 3< <(echo MARK); source /dev/fd/3",
+            "exec 3< <(echo MARK); . /dev/fd/3", "exec {fd}< <(echo MARK); source /dev/fd/$fd", "source /dev/fd/62 62<<< 'MARK'", "source /dev/fd/62 62< <(echo MARK)",
+            "source $\"/dev/stdin\" <<< 'MARK'", "source $'/dev/stdin' <<< 'MARK'", "echo MARK | source /dev/stdin", "echo MARK | . /dev/stdin", "exec 3< <(echo MARK); source /dev//fd/3",
+            "exec 3< <(echo MARK); source /dev/../dev/fd/3", "exec 3< <(echo MARK); source '/dev/fd/3'", "exec 3< <(echo MARK); source /proc/self/fd/3",
+            "source /dev/stdin <<'EOF'\nMARK\nEOF", ". /dev/stdin <<EOF\nMARK\nEOF", "source /dev/stdin <<< \"$(echo MARK)\""]
+_WRAP_SF = [("at the top level", "%s"), ("behind a separator", "echo a; %s"), ("in a brace group", "{ %s\n}"), ("in a subshell", "( %s\n)"), ("in a function", "f() { %s\n}; f")]
+for _bd in _BODY_SF:
+    for _lw, _w in _WRAP_SF:
+        _t = _w % _bd
+        _ran = _real_bash_runs_cmd(_t)
+        check("30500dad part 3 fixture is real (bash runs it): %s %r" % (_lw, _t), _ran is None or _ran)
+        check("30500dad part 3 refused: %s %r" % (_lw, _t), blocks_cwd(_t.replace("MARK", "rm -rf " + GROOT + "/backups"), GROOT))
+for _q in ["source /dev/stdin <<'EOF'\necho hi\nEOF", "source /dev/stdin <<< 'echo hi'", ". /dev/stdin <<EOF\ntrue\nEOF", ". /dev/fd/0 <<'EOF'\necho hi\nEOF", "source /proc/self/fd/0 <<< 'echo hi'", "source /etc/profile", "source /dev/null", "source ~/.bashrc",
+           "source ./a.sh < /dev/null", "source ./a.sh 3< <(echo x)", "echo hi | cat /dev/stdin", "cat /dev/fd/0 < <(echo hi)", "exec 3< <(echo hi); cat /dev/fd/3", "echo '$\"/dev/stdin\"'",
+           "source \"$HOME/.bashrc\"", "source ./venv/bin/activate"]:
+    check("30500dad part 3 stays quiet: %r" % _q, not blocks_cwd(_q, GROOT))
+
+# ---------------------------------------------------------------------------------------------------------------------------
+print("6c7cd4d7 -- a heredoc sourced from stdin behind a keyword, a group opener or a function header on the opener line is CODE (found by the 30500dad round 2 tests):")
+_HD_OPEN = ["{ source /dev/stdin <<'EOF'\nMARK\nEOF\n}", "( . /dev/stdin <<EOF\nMARK\nEOF\n)", "f() { source /dev/stdin <<'EOF'\nMARK\nEOF\n}; f", "if true; then source /dev/stdin <<'EOF'\nMARK\nEOF\nfi",
+            "while true; do . /dev/stdin <<'EOF'\nMARK\nEOF\nbreak; done", "{ source /dev/stdin <<'EOF'\nMARK\nEOF\n} 2>/dev/null", "{ source /dev/stdin <<'EOF'\nMARK\nEOF\n\n}", "x=1 { source /dev/fd/0 <<'EOF'\nMARK\nEOF\n}".replace("x=1 { ", "{ x=1 "),
+            "! source /dev/stdin <<'EOF'\nMARK\nEOF", "{ source /proc/self/fd/0 <<-'EOF'\n\tMARK\n\tEOF\n}", "for i in 1; do source /dev/stdin <<'EOF'\nMARK\nEOF\ndone", "{ { source /dev/stdin <<'EOF'\nMARK\nEOF\n}; }"]
+for _t in _HD_OPEN:
+    _ran = _real_bash_runs_cmd(_t)
+    check("6c7cd4d7 fixture is real (bash runs it): %r" % _t, _ran is None or _ran)
+    check("6c7cd4d7 refused: %r" % _t, blocks_cwd(_t.replace("MARK", "rm -rf " + GROOT + "/backups"), GROOT))
+for _q in ["{ cat <<'EOF'\nrm -rf /x\nEOF\n}", "{ echo hi <<'EOF'\nrm -rf /x\nEOF\n}", "{ source /dev/stdin <<'EOF'\necho hi\nEOF\n}", "( grep -c x <<'EOF'\nrm -rf /x\nEOF\n)",
+           "f() { cat <<'EOF'\nrm -rf /x\nEOF\n}; f", "if true; then cat <<'EOF'\nrm -rf /x\nEOF\nfi", "{ tee /tmp/x.txt <<'EOF'\nrm -rf /x\nEOF\n}", "{ python3 - <<'EOF'\nprint('hi')\nEOF\n}"]:
+    check("6c7cd4d7 stays quiet (the body is data, or the sourced body is harmless): %r" % _q, not blocks_cwd(_q, GROOT))
+check("_heredoc_opener_runs_body: keywords, group openers and a function header in front of source / dot are stepped over, a plain command in front is not",
+      [gate._heredoc_opener_runs_body(h) for h in ("{ source /dev/stdin", "( . /dev/stdin", "f() { source /dev/stdin", "then source /dev/stdin", "do . /dev/fd/0", "! source /dev/stdin",
+                                                     "{ cat", "{ echo hi", "cat", "source /dev/stdin", "{ x=1 source /dev/stdin", "{ env source /dev/stdin")]
+      == [True, True, True, True, True, True, False, False, False, True, True, True])
+
 print()
 if failed:
     print("%d FAILED: %s" % (len(failed), failed), file=sys.stderr)

@@ -529,7 +529,12 @@ def _heredoc_opener_runs_body(head):
     toks = [t for t in re.split(r'\s+', seg.strip()) if t]
     k = 0
     while k < len(toks) and (re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', toks[k])
-                             or os.path.basename(toks[k].strip('"\'')) in _TRANSPARENT):
+                             or os.path.basename(toks[k].strip('"\'')) in _TRANSPARENT
+                             or toks[k] in _KEYWORDS or re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*\(\)', toks[k])):
+        # A keyword, a group opener or a function header on the opener line (`{ source /dev/stdin <<EOF`, `( . /dev/stdin <<EOF`,
+        # `then source ..`, `f() { source ..`) is not the command: the command stands behind it. Without this the first token was `{`, the
+        # source/dot test below never ran, and the body of a heredoc sourced inside a brace group was read as DATA (card 30500dad round 2:
+        # the live gate let it through, while `bash <<EOF` in the same place was caught by the interpreter scan below).
         k += 1
     if k >= len(toks):
         return False
@@ -2299,17 +2304,21 @@ def _strip_funcdef(seg):
     return _FUNCDEF_RE.sub('', seg, count=1)
 
 
+_COPROC_OPEN_RE = re.compile(r'(?<![\w./-])coproc[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*\((?=[ \t])')
+
+
 def _bare_tokens(seg):
     """The words of a segment with the parentheses read as blanks. An ESCAPED parenthesis is a letter of its word (`x=a\\(b rm`, card 40650fd7 round 2),
     so only an unquoted, unescaped one becomes a blank."""
     state = _quote_map(seg)
+    cp_open = {m.end() - 1 for m in _COPROC_OPEN_RE.finditer(seg)}          # `coproc NAME ( cmd )`: the opener stays a word so command_index can step over NAME
     out, i = [], 0
     while i < len(seg):
         if seg[i] == '\\' and not state[i] and i + 1 < len(seg):
             out.append(seg[i:i + 2])
             i += 2
             continue
-        out.append(' ' if seg[i] in '()' else seg[i])
+        out.append('{' if (i in cp_open and not state[i]) else (' ' if seg[i] in '()' else seg[i]))
         i += 1
     return [(t, sp) for t, sp in _tokens(''.join(out)) if t]
 
@@ -2416,6 +2425,22 @@ def _dynamic_program_argument(text, seg, seg_pos, toks, idx, proof=None):
             k += 1
     if qs[k:k + 1] == [0] and text[k:k + 2] in ('<(', '>('):
         return 'a process substitution as the file to source'
+    if qs[k:k + 1] == [0] and text[k:k + 2] in ("$'", '$"'):
+        return 'ANSI-C or locale quoting of the file to source'
+    j = k
+    while j < end and not (text[j] in ' \t' and qs[j] == 0):
+        j += 1
+    operand = text[k:j].replace('"', '').replace("'", '')
+    if operand.startswith('/') and '$' not in operand and '`' not in operand:
+        operand = os.path.normpath(operand)                  # /dev//fd/3, /dev/../dev/fd/3
+    m = re.fullmatch(r'/(?:dev/fd|proc/[^/]+/fd)/(.*)', operand)
+    if m and m.group(1) != '0':
+        return 'a file descriptor as the file to source (its content is whatever the descriptor holds)'
+    if operand == '/dev/stdin' or (m and m.group(1) == '0'):
+        # Card 30500dad (Sam 4877, part 3): the program is the standard input. A literal here-document or here-string is judged by the stdin-program
+        # reader; a pipe, `< file`, `< <(..)` or an inherited stdin is not something the gate can read.
+        if not any(text.startswith('<<', q) and qs[q] == 0 for q in range(j, end)):
+            return 'the standard input as the file to source, fed by something other than a literal here-document or here-string'
     return None
 
 
@@ -2646,6 +2671,9 @@ def command_index(toks):
             return None
         base = _cname(toks[i][0])
         if toks[i][0] in _KEYWORDS and not toks[i][1]:
+            if toks[i][0] == 'coproc' and i + 2 < len(toks) and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', toks[i + 1][0]) and not toks[i + 1][1] \
+                    and toks[i + 2][0] in ('{', '(', 'while', 'until', 'for', 'if', 'case', 'select') and not toks[i + 2][1]:
+                i += 1                 # `coproc NAME { cmd; }`: NAME names the coprocess, it is not the command (card 30500dad, Sam 4877 part 5)
             i += 1
             continue
         if base in _TRANSPARENT:
