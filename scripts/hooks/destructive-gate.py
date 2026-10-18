@@ -502,8 +502,136 @@ def _blank_ranges(text, ranges):
     return ''.join(out)
 
 
-def _heredoc_opener_runs_body(head):
-    """A `<<` ELOTTI resz alapjan: a torzs PROGRAM lesz, vagy egy program BEMENETE?
+_UNKNOWN_FD = object()       # the operand holds an expansion, a glob or a brace, or the working directory cannot be followed (card f917c895)
+_STDIN_ALIAS_RE = re.compile(r'^/(?:dev/stdin|dev/fd/0|proc/(?:self|thread-self|\d+)/fd/0)$')
+_FD_ALIAS_RE = re.compile(r'^/(?:dev/fd|proc/(?:self|thread-self|\d+)/fd)/(\d+)$')
+_CWD_SPLIT_RE = re.compile(r'\|\||&&|[;|&\n(){}]')
+_OPERAND_DYNAMIC_RE = re.compile(r'[$`*?\[{]')
+_GATE_CWD = None             # the working directory of the Bash event, set by _check_bash: a relative program operand is read against it
+
+
+_GATE_CANDS = set()          # the working directories the top-level command can be in (the event cwd + every literal cd anywhere in it)
+_GATE_UNKNOWN = True         # True when the shell may be somewhere the gate cannot name (no event cwd, cd -, pushd, CDPATH, a non-literal cd)
+
+
+def _scan_cds(text, cands, unknown):
+    """Apply every `cd` in `text` to the candidate set (card f917c895). A literal target is applied to every candidate so far and ADDED (a `cd`
+    can fail and fall through: `cd /x 2>/dev/null || cd /dev`); an absolute literal target counts even when the base is unknown. `cd -`,
+    `pushd` / `popd`, CDPATH and a target with an expansion, a glob, a brace or `~user` make the position unknown, but the scan goes on: a
+    later absolute `cd` is a candidate again. A `cd` inside a quote or a data body counts too: one candidate more, never one less."""
+    cands = set(cands)
+    if 'CDPATH' in text:
+        unknown = True
+    for seg in _CWD_SPLIT_RE.split(text):
+        toks = seg.split()
+        k = 0
+        while k < len(toks) and (re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', toks[k]) or toks[k] in _KEYWORDS or toks[k] in ('!', 'time')
+                                 or os.path.basename(toks[k].strip('"\'')) in _TRANSPARENT):
+            k += 1
+        if k >= len(toks):
+            continue
+        name = os.path.basename(toks[k].strip('"\''))
+        if name in ('pushd', 'popd'):
+            unknown = True
+            continue
+        if name != 'cd':
+            continue
+        if '-' in toks[k + 1:]:
+            unknown = True                                       # `cd -`: OLDPWD, not something the gate follows
+            continue
+        args = [t for t in toks[k + 1:] if t == '--' or not t.startswith('-')]
+        if args and args[0] == '--':
+            args = args[1:]
+        tgt = args[0] if args else '~'
+        if _OPERAND_DYNAMIC_RE.search(tgt):
+            unknown = True
+            continue
+        tgt = tgt.replace('"', '').replace("'", '').replace('\\', '')
+        if tgt.startswith('~'):
+            if tgt != '~' and not tgt.startswith('~/'):
+                unknown = True
+                continue
+            tgt = HOME + tgt[1:]
+        if os.path.isabs(tgt):
+            cands.add(os.path.normpath(tgt))
+        else:
+            cands |= {os.path.normpath(os.path.join(c, tgt)) for c in list(cands)}
+    return cands, unknown
+
+
+def _set_cwd_context(cmd, cwd):
+    """Called once per top-level command by _check_bash (and by the tests): the event cwd and the `cd`s of the whole command."""
+    global _GATE_CWD, _GATE_CANDS, _GATE_UNKNOWN
+    _GATE_CWD = os.path.normpath(os.path.expanduser(cwd)) if cwd else None
+    _GATE_CANDS, _GATE_UNKNOWN = _scan_cds(cmd, {_GATE_CWD} if _GATE_CWD else set(), _GATE_CWD is None)
+
+
+def _cwd_candidates(before):
+    """(candidates, unknown) for a program operand: the top-level command's set plus the `cd`s of `before` (a nested text, such as a `-c` program)."""
+    return _scan_cds(before, _GATE_CANDS, _GATE_UNKNOWN)
+
+
+_FD_TAILS = (('dev', 'stdin'), ('dev', 'fd', None), ('proc', '*', 'fd', None))
+
+
+def _could_be_descriptor(w):
+    """Could the relative word `w` name the standard input or a numbered descriptor under SOME working directory? (`stdin`, `0`, `fd/3`,
+    `../dev/stdin`: yes; `script.py`, `helper.sh`, `./lib.sh`: no, whatever the directory.) A `..` in the middle is left unresolved: yes."""
+    parts = [x for x in w.split('/') if x not in ('', '.')]
+    while parts and parts[0] == '..':
+        parts.pop(0)
+    if not parts:
+        return False
+    if '..' in parts:
+        return True
+    for tail in _FD_TAILS:
+        if len(parts) <= len(tail) and all(q == '*' or (q is None and p.isdigit()) or p == q for p, q in zip(parts, tail[len(tail) - len(parts):])):
+            return True
+    return False
+
+
+def _program_operand_fd(word, before):
+    """Which descriptor the program operand `word` (of `source` / `.`, or an interpreter's program file) names, read the way the shell resolves it
+    (card f917c895, Igor 4932, Sam 2107 part 3): 0 for the standard input by ANY lexical path (`/dev/stdin`, `/dev//fd/0`, `/tmp/../dev/stdin`,
+    `//dev/stdin`, `/proc/self/fd/../fd/0`), N for `/dev/fd/N` and its /proc twins, a relative word resolved against every working directory the
+    command's `cd`s can have left the shell in (`cd /dev && source stdin`, `cd /dev/fd && . 3`); None for a word that provably names no
+    descriptor; _UNKNOWN_FD for a word with an expansion, a glob or a brace (`/dev/std${X}in`, `$X`, `/dev/std[i]n`, `/dev/std{,}in`), `~user`,
+    or a relative word that could be a descriptor while the working directory cannot be followed (`source stdin` with no event cwd, `cd $D &&
+    source stdin`). A relative word that is no descriptor under any directory (`script.py`) is a file even then. The live gate compared the
+    literal text with four spellings and let the other 117 shapes of agents_munka/igor/probe-f917c895 run."""
+    if _OPERAND_DYNAMIC_RE.search(word):
+        return _UNKNOWN_FD
+    w = word.replace('"', '').replace("'", '').replace('\\', '')
+    if not w:
+        return None
+    if w.startswith('~'):
+        if w != '~' and not w.startswith('~/'):
+            return _UNKNOWN_FD
+        w = HOME + w[1:]
+    if os.path.isabs(w):
+        paths, unknown = [w], False
+    else:
+        cands, unknown = _cwd_candidates(before)
+        paths = [os.path.join(c, w) for c in cands]
+    fds = set()
+    for p in paths:
+        p = re.sub(r'^/+', '/', os.path.normpath(p))          # normpath keeps a leading `//`; the kernel does not
+        if _STDIN_ALIAS_RE.match(p):
+            fds.add(0)
+        else:
+            m = _FD_ALIAS_RE.match(p)
+            if m:
+                fds.add(int(m.group(1)))
+    if not fds:
+        return _UNKNOWN_FD if unknown and _could_be_descriptor(w) else None
+    if 0 in fds:
+        return 0
+    return fds.pop() if len(fds) == 1 else _UNKNOWN_FD
+
+
+def _heredoc_opener_runs_body(head, before=''):
+    """A `<<` ELOTTI resz alapjan: a torzs PROGRAM lesz, vagy egy program BEMENETE? (`before`: the lines in front of the opener line;
+    card f917c895: the `cd`s there and on the line decide what a relative operand names.)
 
     A kulonbseg nem az, hogy szerepel-e ertelmezo-nev a soron, hanem az, hogy az
     ertelmezo HONNAN veszi a programjat (79d8b59c):
@@ -529,12 +657,13 @@ def _heredoc_opener_runs_body(head):
     # Card e766e16c: the opener may stand INSIDE a process substitution (`cat <(bash <<EOF`, `x=<(python3 - <<PY`): the command that reads the
     # body is the one behind the LAST `<(` / `>(`, read by this same function; the whole-line reading below stays (it holds `sh <(cat <<EOF`,
     # where the substitution is the program file), and the body is code when either reading says so.
+    ctx = before + '\n' + head
     m = None
     for m in re.finditer(r'[<>]\(', seg):
         pass
-    if m and _heredoc_opener_runs_body(seg[m.end():]):
+    if m and _heredoc_opener_runs_body(seg[m.end():], ctx):
         return True
-    toks = [t for t in re.split(r'\s+', seg.strip()) if t]
+    toks = [t for t in (x.lstrip('(') for x in re.split(r'\s+', seg.strip())) if t]    # (card f917c895: `(source /dev/stdin <<EOF`, `{ (source ..`: a glued `(` is a subshell opener)
     k = 0
     while k < len(toks) and (re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', toks[k])
                              or os.path.basename(toks[k].strip('"\'')) in _TRANSPARENT
@@ -547,8 +676,15 @@ def _heredoc_opener_runs_body(head):
     if k >= len(toks):
         return False
     base = os.path.basename(toks[k].strip('"\''))
-    if base in ('.', 'source') and any(t.strip('"\'') in _STDIN_PATHS or t.startswith('<(') for t in toks[k + 1:]):
-        return True                # `. /dev/stdin <<EOF`, `source <(cat <<EOF`: the shell sources its own stdin / the substitution (6a6191f4)
+    if base in ('.', 'source'):
+        # `. /dev/stdin <<EOF`, `source <(cat <<EOF`: the shell sources its own stdin / the substitution (6a6191f4). Card f917c895: the operand is read
+        # the way the shell resolves it (`/tmp/../dev/stdin`, `//dev/stdin`, `cd /dev && source stdin`), and a file the gate cannot resolve (an
+        # expansion, a glob, a brace, a working directory it cannot follow) makes the body CODE: it is judged, and a benign body passes anyway.
+        ops = [t for t in toks[k + 1:] if not t.startswith('-')]
+        if ops and (ops[0].startswith('<(') or _program_operand_fd(ops[0], ctx) in (0, _UNKNOWN_FD)):
+            return True
+        if any(t.startswith('<(') or _program_operand_fd(t, ctx) == 0 for t in toks[k + 1:]):
+            return True
     if _interp_family(base) is None:
         # Ismeretlen burkolo mogott allo ertelmezo (timeout, strace, ...) ugyanugy
         # lefuttatja a torzset. A burkolo argumentum-alakjat nem talalgatjuk: marad
@@ -576,6 +712,9 @@ def _heredoc_opener_runs_body(head):
             continue
         if t.startswith('<('):
             return True            # `sh <(cat <<EOF`: the program file is a process substitution that prints the body (6a6191f4)
+        if _program_operand_fd(t, ctx) in (0, _UNKNOWN_FD):
+            return True            # card f917c895: `bash /tmp/../dev/stdin <<EOF`, `cd /dev && sh stdin <<EOF`, `bash $X <<EOF`: the program file IS the
+                                   # standard input, or the gate cannot tell which file it is; the body is judged as code
         return False               # egy program-FAJL: a torzs annak a bemenete
     return True
 
@@ -833,7 +972,7 @@ def _heredoc_body_ranges(cmd):
     lines = cmd.split('\n')
     data, code = [], []
     for i, j, m, a, b in _heredocs(cmd):
-        runs = (_heredoc_opener_runs_body(lines[i][:m.start()]) or _heredoc_tail_runs_body(lines[i][m.end():]) or _heredoc_piped_to_program(lines, i, j, m)
+        runs = (_heredoc_opener_runs_body(lines[i][:m.start()], '\n'.join(lines[:i])) or _heredoc_tail_runs_body(lines[i][m.end():]) or _heredoc_piped_to_program(lines, i, j, m)
                 or _heredoc_fd_read(lines, i, j, m))
         (code if runs else data).append((a, b))
     return data, code
@@ -849,9 +988,15 @@ def _heredoc_fd_read(lines, i, j, m):
     num = fd.group(1)
     pat = re.compile(r'[<>]&%s(?!\d)|/dev/fd/%s(?!\d)|/proc/self/fd/%s(?!\d)' % (num, num, num))
     scope = lines[i] + '\n' + '\n'.join(lines[j + 1:])
+    before, done = '\n'.join(lines[:i]), 0
     for seg in re.split(r'\|\||&&|[;|\n]|(?<![<>])&(?![<>])', scope):
-        if pat.search(seg) and any(_interp_family(os.path.basename(t.strip('\'"'))) is not None or t in ('.', 'source') for t in seg.split()):
-            return True
+        at = scope.find(seg, done)
+        ctx = before + '\n' + scope[:at]
+        done = at + len(seg)
+        toks = [t.lstrip('(') for t in seg.split()]
+        if any(_interp_family(os.path.basename(t.strip('\'"'))) is not None or t in ('.', 'source') for t in toks) \
+                and (pat.search(seg) or any(_program_operand_fd(t, ctx) == int(num) for t in toks)):
+            return True        # card f917c895: `cd /dev/fd && source 3 3<<EOF`, `cd /dev && . fd/3 3<<EOF`: the descriptor reached by a relative path
     return False
 
 
@@ -893,7 +1038,7 @@ def _heredoc_piped_to_program(lines, i, j, m):
         stages.append(stage)
         ends_with_pipe = stage.rstrip().endswith('|') and not stage.rstrip().endswith('||')
         k += 1
-    return any(_stdin_program_sites(st) for st in stages if st.strip())
+    return any(_stdin_program_sites(st, '\n'.join(lines[:i + 1])) for st in stages if st.strip())    # (card f917c895: `cd /dev && cat <<EOF | source stdin`)
 
 
 class _ScanUnsure(Exception):
@@ -2514,19 +2659,25 @@ def _dynamic_program_argument(text, seg, seg_pos, toks, idx, proof=None):
     if qs[k:k + 1] == [0] and text[k:k + 2] in ("$'", '$"'):
         return 'ANSI-C or locale quoting of the file to source'
     j = k
-    while j < end and not (text[j] in ' \t' and qs[j] == 0):
-        j += 1
-    operand = text[k:j].replace('"', '').replace("'", '')
-    if operand.startswith('/') and '$' not in operand and '`' not in operand:
-        operand = os.path.normpath(operand)                  # /dev//fd/3, /dev/../dev/fd/3
-    m = re.fullmatch(r'/(?:dev/fd|proc/[^/]+/fd)/(.*)', operand)
-    if m and m.group(1) != '0':
+    while j < end and not (text[j] in ' \t\n()<>;&|' and qs[j] == 0):
+        j += 1                       # (card f917c895: `(source /dev/stdin)`: the `)` is not a letter of the word)
+    # Card f917c895: the operand is read the way the shell resolves it (lexically normalised, a relative one against every working directory the
+    # `cd`s in front can have left the shell in): `/dev//fd/3`, `//dev/stdin`, `cd /dev/fd && source 3`, `cd /dev && source stdin < file`.
+    fd = _program_operand_fd(text[k:j], text[:seg_pos])
+    if isinstance(fd, int) and fd != 0:
         return 'a file descriptor as the file to source (its content is whatever the descriptor holds)'
-    if operand == '/dev/stdin' or (m and m.group(1) == '0'):
+    if fd is _UNKNOWN_FD and re.match(r'^["\']?/(?:dev/fd|proc/[^/]+/fd)/', text[k:j]):
+        return 'a file descriptor as the file to source (its number is an expansion)'
+    fed_by_pipe = re.search(r'(?<![|&])\|\s*$', text[:seg_pos]) is not None
+    fed_by_file = any(text[q] == '<' and qs[q] == 0 and not text.startswith('<<', q) and not text.startswith('<(', q)
+                      and text[q - 1:q] != '<' and not text[q - 1:q].isdigit() for q in range(j, end))
+    if fd == 0:
         # Card 30500dad (Sam 4877, part 3): the program is the standard input. A literal here-document or here-string is judged by the stdin-program
         # reader; a pipe, `< file`, `< <(..)` or an inherited stdin is not something the gate can read.
         if not any(text.startswith('<<', q) and qs[q] == 0 for q in range(j, end)):
             return 'the standard input as the file to source, fed by something other than a literal here-document or here-string'
+    elif fd is _UNKNOWN_FD and (fed_by_file or fed_by_pipe):
+        return 'a file to source the gate cannot resolve (an expansion, a glob, a brace, or a working directory it cannot follow), with its standard input fed by a file or a pipe'
     return None
 
 
@@ -4935,7 +5086,7 @@ _STDIN_PATHS = ('-', '/dev/stdin', '/dev/fd/0', '/proc/self/fd/0')
 _SHELL_FAMILIES = ('sh', 'bash', 'zsh')
 
 
-def _stdin_program_sites(text):
+def _stdin_program_sites(text, before=''):
     """[(csalad, pozicio)]: az ertelmezok, amelyek a programjukat a stdin-rol olvassak. A pozicio az
     opciok vege. Idezojelen belul allo ertelmezo-nev (proza) nem szamit.
 
@@ -4979,17 +5130,37 @@ def _stdin_program_sites(text):
         if kind == 'code':
             if fam in _SHELL_FAMILIES:
                 ks = _skip_ws(u, pos)
-                if _stdin_program_sites(u[ks:_interp_word_end(u, ustate, ks)]):
+                if _stdin_program_sites(u[ks:_interp_word_end(u, ustate, ks)], before + '\n' + u[:ks]):
                     out.append((fam, back(pos)))        # `bash -c 'source /dev/stdin'`: the -c code reads the stdin of the shell
             continue
         if kind == 'arg' and u[pos:_interp_word_end(u, ustate, pos)] not in _STDIN_PATHS \
+                and _program_operand_fd(u[pos:_interp_word_end(u, ustate, pos)], before + '\n' + u[:m.start()]) != 0 \
                 and not (fam in _SHELL_FAMILIES and _shell_s_flag(u, ustate, m.end())):
-            continue                                   # program-FAJL: a stdin annak az adata
+            continue                                   # program-FAJL: a stdin annak az adata (card f917c895: the file is read the way the shell
+                                                       # resolves it, `cd /dev && bash stdin`, `sh /dev//stdin`. A file the gate cannot resolve (`bash $S/x.sh`)
+                                                       # stays a FILE here: the whole-corpus price showed 4 real fleet commands turning into structure
+                                                       # refusals when it was a site; the heredoc reader above still takes `bash $X <<EOF` as code)
         out.append((fam, back(pos)))
-    for m in re.finditer(r'(?<![\w./-])(?:source|\.)[ \t]+(?:/dev/stdin|/dev/fd/0|/proc/self/fd/0)(?=[\s;&|)<>]|$)', u):
-        if standalone(m.start(), m.start() + (6 if u.startswith('source', m.start()) else 1)):
-            out.append(('bash', back(m.end())))        # `| . /dev/stdin`: the shell sources its own stdin
+    for m in re.finditer(r'(?<![\w./-])(?:source|\.)[ \t]+(?:--[ \t]+)?([^\s;&|)<>]+)', u):
+        # `| . /dev/stdin`: the shell sources its own stdin. Card f917c895: by ANY path that reaches it (`//dev/stdin`, `cd /dev && source stdin`,
+        # `/dev/std${X}in`), and a file the gate cannot resolve is a site too (what it holds is judged only where something feeds the command).
+        if not standalone(m.start(), m.start() + (6 if u.startswith('source', m.start()) else 1)):
+            continue
+        fd = _program_operand_fd(m.group(1), before + '\n' + u[:m.start()])
+        if fd == 0 or (fd is _UNKNOWN_FD and _at_command_position(u, m.start())):
+            out.append(('bash', back(m.end())))        # (an unresolvable file counts only where the dot / source is a COMMAND: `printf "%s" . "$x"`,
+                                                       # `grep . --include=*.md`, `grep -cE . $S/x` are arguments; the price found 3 fleet commands so)
     return out
+
+
+def _at_command_position(u, a):
+    """Is u[a:] the first word of a simple command? The text in front, blanks ignored, is empty, ends at a separator or a group opener, or ends
+    with a keyword / a transparent wrapper word (card f917c895: a `.` that is an ARGUMENT is not a source)."""
+    head = u[:a].rstrip(' \t')
+    if not head or head[-1] in '|;&({\n':
+        return True
+    last = re.split(r'[\s;&|(){}]+', head)[-1]
+    return last in _KEYWORDS or last in ('!', 'time') or os.path.basename(last) in _TRANSPARENT
 
 
 def _shell_s_flag(text, state, k):
@@ -5128,7 +5299,7 @@ def _stdin_pipe_ranges(text):
         if not toks or k == 0:
             continue
         old_form = _interp_family(toks[0]) is not None and '-' in toks[1:]
-        sites = _stdin_program_sites(text[a:b])
+        sites = _stdin_program_sites(text[a:b], text[:a])        # (card f917c895: `cd /dev && echo .. | source stdin`: the cd stands in front of the pipe)
         if old_form or sites:
             # A shell-e a stdin-program, CSAK a `sites` dontse (az ertelmezo programja tenyleg a stdin).
             # A regi `old_form` ('-' bárhol a tokenek kozott) `bash scripts/agent-msg.sh zola sam -`-ra is
@@ -5257,7 +5428,7 @@ def _foreign_code_ranges(cmd):
         head = lines[i][:m.start()]
         seg = re.split(r'\|\||&&|[;|&]', head)[-1]
         names = [os.path.basename(t.strip('"\'')) for t in seg.split()]
-        if any(_interp_family(n) in _NON_SHELL_INTERPRETERS for n in names) and _heredoc_opener_runs_body(head):
+        if any(_interp_family(n) in _NON_SHELL_INTERPRETERS for n in names) and _heredoc_opener_runs_body(head, '\n'.join(lines[:i])):
             out.append((a, b))
     return out
 
@@ -6158,6 +6329,10 @@ def check_bash(cmd, _depth=0, cwd=None):
 
 
 def _check_bash(cmd, _depth=0, cwd=None):
+    if _depth == 0:
+        # card f917c895: a relative program operand (`cd /dev && source stdin`) is read against the event's working directory and the `cd`s of the
+        # whole command, by every reader below; a nested call (a subshell, a pipe part, a -c program) keeps the top-level context
+        _set_cwd_context(cmd, cwd)
     text = scannable(cmd)
     # A backslash-newline is a LINE CONTINUATION: the shell reads `git \<NL> push --force` as ONE command. check_bash has already
     # removed the real ones (_normalize_continuations, card 798c3c24); the blind replace that stood here read an escaped backslash, a

@@ -4153,6 +4153,74 @@ for _q in ["source /dev/stdin <<'EOF'\necho hi\nEOF", "source /dev/stdin <<< 'ec
            "source \"$HOME/.bashrc\"", "source ./venv/bin/activate"]:
     check("30500dad part 3 stays quiet: %r" % _q, not blocks_cwd(_q, GROOT))
 
+print("f917c895 -- a source / . (or an interpreter's program file) that reaches stdin or a numbered descriptor by a path the gate did not read the way the shell resolves it (Igor 4932, Sam 2107 part 3):")
+_BODY_F917 = ["source /tmp/../dev/stdin <<EOF\nMARK\nEOF", ". /dev/./stdin <<'EOF'\nMARK\nEOF", "source /dev//stdin <<< 'MARK'", "source //dev/stdin <<EOF\nMARK\nEOF",
+              ". /dev//fd/0 <<EOF\nMARK\nEOF", "source /proc/self/fd/../fd/0 <<< 'MARK'", "source -- /tmp/../dev/stdin <<EOF\nMARK\nEOF", "echo MARK | source //dev/stdin",
+              "echo MARK | . /dev/./stdin", "source /dev/std${X}in <<EOF\nMARK\nEOF", "X=/dev/stdin; source $X <<EOF\nMARK\nEOF", "X=/dev/stdin; source \"$X\" <<< 'MARK'",
+              "source /dev/$(echo stdin) <<EOF\nMARK\nEOF", "source `echo /dev/stdin` <<EOF\nMARK\nEOF", "source /dev/std[i]n <<EOF\nMARK\nEOF", "source /dev/std{,}in <<EOF\nMARK\nEOF",
+              "source ${X:-/dev/stdin} <<< 'MARK'", "echo MARK | source /dev/std${X}in", "echo MARK | source $(printf /dev/stdin)",
+              "cd /dev && source stdin <<EOF\nMARK\nEOF", "cd /dev; . ./stdin <<< 'MARK'", "cd /dev/fd && source 0 <<EOF\nMARK\nEOF", "cd / && source dev/stdin <<EOF\nMARK\nEOF",
+              "cd /tmp && source ../dev/stdin <<EOF\nMARK\nEOF", "cd /proc/self && source fd/0 <<< 'MARK'", "cd /dev && cd fd && source 0 <<EOF\nMARK\nEOF",
+              "cd -P /dev && source stdin <<EOF\nMARK\nEOF", "cd -- '/dev' && source stdin <<EOF\nMARK\nEOF", "cd /dev\nsource stdin <<EOF\nMARK\nEOF",
+              "cd /nonexistent-dir-x 2>/dev/null || cd /dev; source stdin <<EOF\nMARK\nEOF", "cd /dev && cd /nonexistent-dir-x 2>/dev/null; source stdin <<EOF\nMARK\nEOF",
+              "cd /dev && cd .. && source dev/stdin <<EOF\nMARK\nEOF", "D=/dev; cd $D && source stdin <<EOF\nMARK\nEOF", "cd $(echo /dev) && source stdin <<< 'MARK'",
+              "pushd /dev >/dev/null && source stdin <<EOF\nMARK\nEOF", "OLDPWD=/dev; cd - >/dev/null && source stdin <<EOF\nMARK\nEOF",
+              "CDPATH=/; cd dev >/dev/null && source stdin <<EOF\nMARK\nEOF", "echo MARK | (cd /dev && source stdin)",
+              "cd /dev/fd && source 3 3<<EOF\nMARK\nEOF", "cd /dev && source fd/3 3<<EOF\nMARK\nEOF", "exec 3< <(echo MARK); cd /dev/fd && source 3",
+              "cd /dev && source stdin < <(echo MARK)", "X=/dev/stdin; source $X < <(echo MARK)", "cd /dev && echo MARK | source stdin", "cd /dev\necho MARK | source stdin",
+              "cd /dev; echo MARK | . ./stdin", "cd /dev && cat <<EOF | source stdin\nMARK\nEOF", "cd /dev\ncat <<EOF | source stdin\nMARK\nEOF", "cd /dev\nsource stdin <<< 'MARK'",
+              "echo MARK | (source /dev/stdin)", "(source /dev/stdin <<EOF\nMARK\nEOF\n)", "(. /dev/stdin <<< 'MARK')", "(cd /dev/fd && source 3 3<<EOF\nMARK\nEOF\n)",
+              "(source /tmp/../dev/stdin <<EOF\nMARK\nEOF\n)", "echo MARK | (cd /dev && . stdin)"]
+for _bd in _BODY_F917:
+    for _lw, _w in _WRAP_SF:
+        _t = _w % _bd
+        _ran = _real_bash_runs_cmd(_t)
+        check("f917c895 fixture is real (bash runs it): %s %r" % (_lw, _t), _ran is None or _ran)
+        check("f917c895 refused: %s %r" % (_lw, _t), blocks_cwd(_t.replace("MARK", "rm -rf " + GROOT + "/backups"), GROOT))
+# An interpreter's program file by the same paths: bash ran every one of these in the probe set (agents_munka/igor/probe-f917c895, 2026-10-19); the
+# MARK fixture cannot show it here, because a child shell does not inherit the MARK function. `~root/../../dev/stdin` is here for the same reason
+# (bash in this jail does not expand ~root).
+for _t in ["bash /tmp/../dev/stdin <<EOF\nMARK\nEOF", "sh /dev//stdin <<EOF\nMARK\nEOF", "bash /dev/fd/./0 <<EOF\nMARK\nEOF", "cd /dev && bash stdin <<EOF\nMARK\nEOF",
+           "cd /dev/fd && sh 0 <<EOF\nMARK\nEOF", "bash /dev/std${X}in <<EOF\nMARK\nEOF", "X=/dev/stdin; bash $X <<EOF\nMARK\nEOF",
+           "python3 /dev//stdin <<PY\nimport os\nos.system(\"MARK\")\nPY", "cd /dev\nbash stdin <<EOF\nMARK\nEOF", "source ~root/../../dev/stdin <<EOF\nMARK\nEOF",
+           "cd /dev && bash fd/3 3<<EOF\nMARK\nEOF", "bash /dev//fd/3 3<<EOF\nMARK\nEOF"]:
+    check("f917c895 interpreter program file refused: %r" % _t, blocks_cwd(_t.replace("MARK", "rm -rf " + GROOT + "/backups"), GROOT))
+# The pipe side: the sites reader names the reader by any path to stdin (and by an unresolvable file). What the PRODUCER feeds it is judged by the
+# pipe reader, whose unquoted-producer limit is card cfef60f8 (`echo rm -rf X | bash` passes this root today), so the check here is the site.
+for _t in ["echo x | bash /dev//stdin", "echo x | sh /tmp/../dev/stdin", "cd /dev && echo x | bash stdin", "cd /dev\necho x | sh stdin", "echo x | (cd /dev && bash stdin)",
+           "X=/dev/stdin; echo x | source $X", "echo x | source /dev/std${X}in", "cd /dev/fd && echo x | . 0", "echo x | { . $X; }", "echo x | (. $X)", "echo x | if true; then . $X; fi"]:
+    gate._set_cwd_context(_t, GROOT)
+    check("f917c895 stdin-program site by a resolved path: %r" % _t, bool(gate._stdin_program_sites(_t)))
+# (an interpreter's program file that is an expansion, `bash $X`, stays a file on the pipe side: the price measured 4 real fleet commands, `bash $S/x.sh`
+# and `bash "$f"`, turning into structure refusals when it was a site; `bash $X <<EOF` is code by the heredoc reader all the same)
+for _q in ["echo x | bash ./run.sh", "cd /tmp && echo x | bash stdin", "echo x | python3 script.py", "cat a | source ./lib.sh", "echo x | bash $X", "cat a | python3 \"$S/parse.py\"",
+           "printf \"%s\" \".\" \"$(grep -rln x . 2>/dev/null)\"", "grep -rn -F x . --include=\"*.md\"", "grep -cE \".\" $S/dd4.txt", "echo finished . $x"]:
+    gate._set_cwd_context(_q, GROOT)
+    check("f917c895 no site for a program file: %r" % _q, not gate._stdin_program_sites(_q))
+gate._set_cwd_context("echo x | source stdin", None)
+check("f917c895 no event cwd: a relative word that could be stdin is a site", bool(gate._stdin_program_sites("echo x | source stdin")))
+check("f917c895 no event cwd: a relative word that cannot be a descriptor is a file", not gate._stdin_program_sites("echo x | source script.sh"))
+check("f917c895 no event cwd: an interpreter program file that could be stdin stays a file on the pipe side (named limit)", not gate._stdin_program_sites("echo x | bash stdin"))
+gate._set_cwd_context("", GROOT)
+# The text in front travels with a nested text too (a script file the gate reads, a -c program): with a context that lacks the cd, the readers
+# still see the cd that stands in the text they are given.
+check("f917c895 the opener reader sees the lines in front", gate._heredoc_opener_runs_body("source stdin ", "cd /dev && true") and not gate._heredoc_opener_runs_body("source stdin ", ""))
+check("f917c895 the heredoc classifier passes the lines in front", bool(gate._heredoc_body_ranges("cd /dev\nsource stdin <<EOF\nx\nEOF")[1]) and not gate._heredoc_body_ranges("cd /tmp\nsource stdin <<EOF\nx\nEOF")[1])
+check("f917c895 the heredoc-to-pipe reader sees the lines in front", bool(gate._heredoc_body_ranges("cd /dev\ncat <<EOF | source stdin\nx\nEOF")[1]) and not gate._heredoc_body_ranges("cd /tmp\ncat <<EOF | source stdin\nx\nEOF")[1])
+check("f917c895 the sites reader sees the text in front", bool(gate._stdin_program_sites("echo x | source stdin", "cd /dev && ")) and not gate._stdin_program_sites("echo x | source stdin", "cd /tmp && "))
+# The event cwd itself is a candidate: an agent standing in /dev sources its stdin with `source stdin`.
+check("f917c895 the event cwd is a candidate: source stdin <<EOF with cwd /dev is refused", blocks_cwd("source stdin <<EOF\nrm -rf " + GROOT + "/backups\nEOF", "/dev"))
+check("f917c895 the event cwd is a candidate: the same with cwd /tmp is data", not blocks_cwd("source stdin <<EOF\nrm -rf " + GROOT + "/backups\nEOF", "/tmp"))
+for _q in ["source ./venv/bin/activate", "source \"$HOME/.nvm/nvm.sh\"", "cd /tmp && source ./env.sh", ". ./lib.sh", "source /etc/profile", "cd $D && source ./env.sh",
+           "source \"$VENV/bin/activate\" && pip list", "cat <<EOF\ncd /dev && source stdin\nEOF", "echo 'cd /dev && source stdin'", "source ./x.sh <<EOF\nhello world\nEOF",
+           "source setup.sh <<< 'hi'", "cd /dev && source ../etc/profile", "echo hi | source ./lib.sh", "source /tmp/../dev/stdin <<EOF\necho hi\nEOF",
+           "cd /dev && source stdin <<EOF\ntrue\nEOF", "X=/dev/stdin; source $X <<'EOF'\necho hi\nEOF", "cat /tmp/../dev/stdin <<EOF\nrm -rf " + GROOT + "/backups\nEOF",
+           "cd /dev && cat stdin <<EOF\nrm -rf " + GROOT + "/backups\nEOF", "echo x | grep -c x /dev//stdin", "echo x | python3 script.py", "cat data.csv | python3 \"$S/parse.py\"",
+           "echo hi | bash ./run.sh", "bash ./run.sh <<EOF\nrm -rf " + GROOT + "/backups\nEOF", "cd /tmp && bash ./run.sh <<EOF\nrm -rf " + GROOT + "/backups\nEOF",
+           "source ./a.sh < /dev/null", "source \"$HOME/x.sh\" 3< <(echo x)", "(source ./env.sh)", "(cd /tmp && source ./env.sh)", "(source ./x.sh <<EOF\nhello\nEOF\n)"]:
+    check("f917c895 stays quiet: %r" % _q, not blocks_cwd(_q, GROOT))
+
+
 # ---------------------------------------------------------------------------------------------------------------------------
 print("6c7cd4d7 -- a heredoc sourced from stdin behind a keyword, a group opener or a function header on the opener line is CODE (found by the 30500dad round 2 tests):")
 _HD_OPEN = ["{ source /dev/stdin <<'EOF'\nMARK\nEOF\n}", "( . /dev/stdin <<EOF\nMARK\nEOF\n)", "f() { source /dev/stdin <<'EOF'\nMARK\nEOF\n}; f", "if true; then source /dev/stdin <<'EOF'\nMARK\nEOF\nfi",
