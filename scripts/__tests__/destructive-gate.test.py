@@ -3301,6 +3301,34 @@ check("_border_at: ; | newline ( { and a background & end the command, the & of 
       == [True, True, True, True, True, True, False, False, False, False])
 
 # ---------------------------------------------------------------------------------------------------------------------------
+print("8c16a013 -- a closed substitution in front of the word is one word of the prefix, not the place where the command starts (Sam 4779):")
+_LEAD8C = ["x=$(echo) ", "x=1 y=$(echo) ", "x=$(echo a b) y=$(date) ", "x=$((1+2)) ", "x=$(echo $(date)) ", ">$(echo /dev/null) ", "2>&1 x=$(echo) ", "x=$(echo) 2>&1 ",
+           "env x=$(echo) ", "echo a; x=$(echo) ", "x=${X:-a;b} ", "x=`echo` ", "x=$(echo) y=`date` ", "x=$(echo \")\") ", "x=$(echo '(') "]
+_BODY8C = ["r$(echo)m -rf TGT", "$(echo rm) -rf TGT", "r`echo`m -rf TGT", "r$(:)m -rf TGT", "\"r$(echo)m\" -rf TGT", "command r$(echo)m -rf TGT",
+           "g$(echo)it push --force origin x"]
+_WRAP8C = [("at the top level", "%s"), ("in a case arm", "case x in x) %s;; esac"), ("behind a brace group opener", "{ %s ; }"), ("in a subshell", "( %s )")]
+for _bd in _BODY8C:
+    for _ld in _LEAD8C:
+        if _ld == "env x=$(echo) " and _bd.startswith("command "):
+            continue                                   # `env command x` looks for a program called command
+        for _lw, _w in _WRAP8C:
+            _t = _w % (_ld + _bd)
+            _ran = _real_bash_runs_cmd(_t.replace("TGT", "nothere"))
+            check("8c16a013 fixture is real (bash runs it): %s %r" % (_lw, _t), _ran is None or _ran or "git push" in _t)
+            check("8c16a013 refused: %s %r" % (_lw, _t), blocks_cwd(_t.replace("TGT", GROOT + "/backups"), GROOT))
+for _q in ["x=$(date) ls", "x=$(date) echo r$(echo)m", "x=$(date) ls $(pwd)", "x=$(echo a) y=$(date) make", "x=$(date) cat r$(echo)m", "y=$(echo) git log $(git rev-parse HEAD)",
+           "echo $(date) r$(echo)m", "ls $(pwd) r$(echo)m", "cat <(echo a) r$(echo)m", "x=$(echo) echo y=$(date) r$(echo)m", "f=$(date); echo $f", "x=${X:-a;b} ls",
+           "x=$(date) git log --oneline -n 1", "x=$(echo) true && echo r$(date)m", "grep $(echo a) f | wc -l"]:
+    check("8c16a013 stays quiet (the substitution is an argument or a value): %r" % _q, not blocks_cwd(_q, GROOT))
+_WB = lambda t, n=1: gate._walk_back(t, gate._quote_map(t), t.index("r$(", 0) + 1 if n == 1 else n, True)
+check("_walk_back: a closed substitution in front is one word X, a border before it is found, an unmatched ( is a border",
+      [_WB("x=$(echo) r$(echo)m"), _WB("echo a; x=$(echo) r$(echo)m"), _WB("(r$(echo)m)"), _WB("x=$(echo a $(date)) y=$((1+2)) r$(echo)m"), _WB("x=${ echo; } r$(echo)m")]
+      == [(-1, "x=$X r"), (6, " x=$X r"), (0, "r"), (-1, "x=$X y=$X r"), (-1, "x=$X r")])
+check("_open_of: the opener of a closed group, nested ones counted, an unbalanced or quoted one is not found, a plain { is not a ${",
+      [gate._open_of(t, gate._quote_map(t), i) for t, i in (("$(a)", 3), ("$(a (b) c)", 9), ("(a", 1), ("${ a; }", 6), ("{ a; }", 5), ("echo ')'", 6), ("a)", 1), ("$(a \")\")", 7), ("$(a '(')", 7))]
+      == [1, 1, -1, 1, -1, -1, -1, 1, 1])
+
+# ---------------------------------------------------------------------------------------------------------------------------
 print("6a6191f4 -- a heredoc body handed on to a shell or an interpreter is a PROGRAM (cat <<EOF | sh), not data:")
 _HD_BODY = RM + " -rf " + GROOT + "/backups"
 

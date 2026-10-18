@@ -5085,6 +5085,48 @@ def _has_separator(prefix):
     return any(c in ';|\n' for c in prefix) or any(c == '&' and _is_background_amp(prefix, q) for q, c in enumerate(prefix))
 
 
+def _open_of(text, state, k):
+    """Offset of the unquoted `(` (or, for a `}`, the `{` of a `${`) that opens the group closing at text[k], or -1. Used by the back-walk of
+    _opaque_substitution to step OVER a closed substitution in front of the word instead of stopping at its inner opener."""
+    close = text[k]
+    opener = '(' if close == ')' else '{'
+    depth, j = 0, k
+    while j >= 0:
+        if not state[j]:
+            if text[j] == close and (j == 0 or text[j - 1] != '\\'):
+                depth += 1
+            elif text[j] == opener and (j == 0 or text[j - 1] != '\\'):
+                depth -= 1
+                if depth == 0:
+                    return j if (close == ')' or (j > 0 and text[j - 1] == '$')) else -1
+        j -= 1
+    return -1
+
+
+def _walk_back(text, state, w, dollar_brace_is_word):
+    """(offset of the border in front of w, the text between that border and w with each CLOSED group stepped over replaced by `X`). A closed
+    `$(..)`, `(..)` or `${ .. }` in front of the word is one word of the prefix (`x=$(echo) r$(echo)m`: the prefix is `x=$X r`, the command is `r..`), not a
+    place where the command starts: stopping at the inner `(` read `echo) r` and found `echo` to be the command (card 8c16a013, Sam 4779)."""
+    k, cuts = w - 1, []
+    while k >= 0:
+        if not state[k] and text[k] in ')}':
+            o = _open_of(text, state, k)
+            if o >= 0:
+                cuts.append((o, k))
+                k = o - 1
+                continue
+        if _border_at(text, state, k) and not (dollar_brace_is_word and text[k] == '{' and k and text[k - 1] == '$'):
+            break
+        k -= 1
+    pieces, cur = [], k + 1
+    for o, c in sorted(cuts):
+        pieces.append(text[cur:o])
+        pieces.append('X')
+        cur = c + 1
+    pieces.append(text[cur:w])
+    return k, ''.join(pieces)
+
+
 def _opaque_substitution(text):
     """A parancsnev helyen allo `$(...)` / backtick reszlete, vagy None."""
     state = _quote_map(text)
@@ -5105,13 +5147,10 @@ def _opaque_substitution(text):
         if w > 0 and text[w - 1] not in ' \t;&|\n':
             # `x=$(..)`, `($(..)`, `echo foo$(..)`: not a word of its own, nothing to say. But `r$(echo m) -rf x`: a substitution glued to a literal in
             # front, in the BASENAME of the word that is the command, is the command named by an expansion (card 8ed4c8e8).
-            k = w - 1
-            while k >= 0 and not (_border_at(text, state, k) and not (text[k] == '{' and k and text[k - 1] == '$')):
-                k -= 1
+            k, gprefix = _walk_back(text, state, w, True)
             if k >= 1 and text[k] == '(' and text[k - 1] in '($':
                 if text[k - 1] == '(':
                     continue                           # inside (( )) / $(( )): arithmetic, no command is named there
-            gprefix = text[k + 1:w]
             if state[w] == 2 and gprefix.count('"') % 2 == 1 and gprefix.count("'") % 2 == 0 and not _has_separator(gprefix):
                 gprefix += '"'                         # the quote is the one the word opened: close it, the prefix is then read like any other
             if gprefix.count('"') % 2 or gprefix.count("'") % 2 or _has_separator(gprefix):
@@ -5138,10 +5177,7 @@ def _opaque_substitution(text):
             if gtoks and _git_subcommand_slot(gtoks, True):
                 return text[w:w + 30].strip()
             continue
-        j = w - 1
-        while j >= 0 and not _border_at(text, state, j):
-            j -= 1
-        prefix = text[j + 1:w]
+        j, prefix = _walk_back(text, state, w, False)
         if prefix.count('"') % 2 or prefix.count("'") % 2:
             continue      # a stray quote: _quote_map lost sync inside a nested `"$(.. "x" ..)"`, nothing is known
         toks = _bare_tokens(prefix)
