@@ -5068,6 +5068,23 @@ def _slash_outside_braces(s):
     return False
 
 
+def _border_at(text, state, k):
+    """Is text[k] an unquoted character that ends the command in front of it (`;`, `|`, a newline, `(`, `{`, or a `&` that is a border)? The back-walks of
+    _opaque_substitution stop here to find where the command's own words begin. The `&` of a redirection (`2>&1`, `>&2`, `<&0`, `2>&-`) is NOT a border: the
+    command word comes after it, and cutting the prefix behind it read `1` as the command (card 6b631f69 round 4: `2>&1 r$(echo)m -rf X` ran rm)."""
+    if state[k]:
+        return False
+    c = text[k]
+    if c == '&':
+        return _is_background_amp(text, k, state)
+    return c in ';|\n({'
+
+
+def _has_separator(prefix):
+    """Does this prefix hold a `;`, `|`, a newline or a `&` that ends a command? The `&` of a redirection (`2>&1`, `&>f`) does not (card 6b631f69 round 4)."""
+    return any(c in ';|\n' for c in prefix) or any(c == '&' and _is_background_amp(prefix, q) for q, c in enumerate(prefix))
+
+
 def _opaque_substitution(text):
     """A parancsnev helyen allo `$(...)` / backtick reszlete, vagy None."""
     state = _quote_map(text)
@@ -5089,15 +5106,15 @@ def _opaque_substitution(text):
             # `x=$(..)`, `($(..)`, `echo foo$(..)`: not a word of its own, nothing to say. But `r$(echo m) -rf x`: a substitution glued to a literal in
             # front, in the BASENAME of the word that is the command, is the command named by an expansion (card 8ed4c8e8).
             k = w - 1
-            while k >= 0 and not (text[k] in ';&|\n({' and not state[k] and not (text[k] == '{' and k and text[k - 1] == '$')):
+            while k >= 0 and not (_border_at(text, state, k) and not (text[k] == '{' and k and text[k - 1] == '$')):
                 k -= 1
             if k >= 1 and text[k] == '(' and text[k - 1] in '($':
                 if text[k - 1] == '(':
                     continue                           # inside (( )) / $(( )): arithmetic, no command is named there
             gprefix = text[k + 1:w]
-            if state[w] == 2 and gprefix.count('"') % 2 == 1 and gprefix.count("'") % 2 == 0 and not any(c in gprefix for c in ';&|\n'):
+            if state[w] == 2 and gprefix.count('"') % 2 == 1 and gprefix.count("'") % 2 == 0 and not _has_separator(gprefix):
                 gprefix += '"'                         # the quote is the one the word opened: close it, the prefix is then read like any other
-            if gprefix.count('"') % 2 or gprefix.count("'") % 2 or any(c in gprefix for c in ';&|\n'):
+            if gprefix.count('"') % 2 or gprefix.count("'") % 2 or _has_separator(gprefix):
                 continue                               # a stray quote or a separator inside the prefix: the quote map lost sync (heredoc text), nothing is known
             e = w
             while e < len(text) and not (text[e] in ' \t\n;&|' and not state[e]):
@@ -5122,7 +5139,7 @@ def _opaque_substitution(text):
                 return text[w:w + 30].strip()
             continue
         j = w - 1
-        while j >= 0 and not (text[j] in ';&|\n({' and not state[j]):
+        while j >= 0 and not _border_at(text, state, j):
             j -= 1
         prefix = text[j + 1:w]
         if prefix.count('"') % 2 or prefix.count("'") % 2:

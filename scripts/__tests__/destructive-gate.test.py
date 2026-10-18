@@ -3275,6 +3275,32 @@ for _q in ["case x in x) echo $(date);; esac", "case x in x) echo r$(echo)m;; es
     check("bdcfa13a r2 stays quiet (the substitution is an argument or a value): %r" % _q, not blocks_cwd(_q, GROOT))
 
 # ---------------------------------------------------------------------------------------------------------------------------
+print("6b631f69 round 4 -- the & of a redirection (2>&1, >&2, <&0, 2>&-) is not a border: the command word behind it, built by a substitution, is judged (Sam 4740):")
+_LEAD6B4 = ["2>&1 ", "1>&2 ", ">&2 ", "<&0 ", "2>&- ", "x=1 2>&1 ", "2>&1 2>&1 ", "&>/dev/null ", ">/dev/null ", "env 2>&1 ", "nohup 2>&1 ", "{ 2>&1 ", "echo a; 2>&1 "]
+_BODY6B4 = ["r$(echo)m -rf TGT", "$(echo rm) -rf TGT", "r`echo`m -rf TGT", "r$(:)m -rf TGT", "\"r$(echo)m\" -rf TGT", "command r$(echo)m -rf TGT",
+            "env r$(echo)m -rf TGT", "g$(echo)it push --force origin x"]
+for _bd in _BODY6B4:
+    check("6b631f69 r4 precondition, the same command without a lead is refused: %s" % _bd,
+          blocks_cwd(_bd.replace("TGT", GROOT + "/backups"), GROOT))
+    for _ld in _LEAD6B4:
+        if _ld in ("env 2>&1 ", "nohup 2>&1 ") and _bd.startswith("command "):
+            continue                                   # `env command x` looks for a program called command: not a shape bash runs as a command word
+        _t = _ld + _bd + (" ; }" if _ld.startswith("{") else "")
+        _ran = _real_bash_runs_cmd(_t.replace("TGT", "nothere"))
+        check("6b631f69 r4 fixture is real (bash runs it): %r" % _t, _ran is None or _ran or "git push" in _t)
+        check("6b631f69 r4 refused: %r" % _t, blocks_cwd(_t.replace("TGT", GROOT + "/backups"), GROOT))
+for _q in ["echo a 2>&1 r$(echo)m", "2>&1 echo r$(echo)m", "2>&1 echo $(date)", "2>&1 ls $(pwd)", "make 2>&1 | tee build.log", "cat x 2>&1 | grep r$(echo)m",
+           "ls &>/dev/null; echo $(date)", "sleep 1 & echo $(date)", "x=$(date) 2>&1 ls", "git log 2>&1 $(git rev-parse HEAD)", "2>&1 git log --oneline $(git rev-parse HEAD)",
+           "echo 2>&1 g$(echo)it", "ls 2>&1 && echo r$(date)m", "echo \"a & b\" r$(echo)m"]:
+    check("6b631f69 r4 stays quiet (the substitution is an argument): %r" % _q, not blocks_cwd(_q, GROOT))
+check("_has_separator: the & of a redirection is no separator, a lone &, &&, ;, | and a newline are",
+      [gate._has_separator(c) for c in ("2>&1 r", ">&2 r", "<&0 r", "2>&- r", "&>f r", "a & b", "a && b", "a;b", "a|b", "a\nb", "a |& b")]
+      == [False, False, False, False, False, True, True, True, True, True, True])
+check("_border_at: ; | newline ( { and a background & end the command, the & of 2>&1 does not, a quoted one never does",
+      [gate._border_at(c, gate._quote_map(c), i) for c, i in (("a;b", 1), ("a|b", 1), ("a\nb", 1), ("(a", 0), ("{a", 0), ("a & b", 2), ("2>&1 r", 2), ("a&>f", 1), ("\"a;b\"", 2), ("'a&b'", 2))]
+      == [True, True, True, True, True, True, False, False, False, False])
+
+# ---------------------------------------------------------------------------------------------------------------------------
 print("6a6191f4 -- a heredoc body handed on to a shell or an interpreter is a PROGRAM (cat <<EOF | sh), not data:")
 _HD_BODY = RM + " -rf " + GROOT + "/backups"
 
