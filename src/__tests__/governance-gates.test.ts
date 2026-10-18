@@ -13,7 +13,7 @@ import {
 import { MAIN_AGENT_ID } from '../config.js'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { mkdtempSync, mkdirSync, symlinkSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, symlinkSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 
 // --- self-pace-gate: blocks the agent from scheduling its own future turns ---
@@ -364,7 +364,14 @@ describe('self-pace-gate compound-command false-positives', () => {
   })
   it('ALLOWS a wrapped scheduler READ, and a crontab-prefixed script name', () => {
     expect(selfPaceDecision('Bash', { command: 'sudo crontab -l' }).deny).toBe(false)
-    expect(selfPaceDecision('Bash', { command: './scripts/crontab-helper.sh status' }).deny).toBe(false)
+    // a script path, run directly or through an interpreter, must now be one the gate can read (card 9f57f705). The interpreter
+    // half is the owner's decision (HEX 3980); denying a MISSING direct path is round 3's own extension of that principle. The
+    // name is the point of this test, so the file really exists
+    const helperDir = mkdtempSync(join(tmpdir(), 'crontab-helper-'))
+    mkdirSync(join(helperDir, 'scripts'))
+    writeFileSync(join(helperDir, 'scripts', 'crontab-helper.sh'), '#!/bin/bash\necho status\n')
+    expect(selfPaceDecision('Bash', { command: './scripts/crontab-helper.sh status' }, { cwd: helperDir }).deny).toBe(false)
+    rmSync(helperDir, { recursive: true, force: true })
     expect(selfPaceDecision('Bash', { command: 'at=$(date +%s); echo $at' }).deny).toBe(false)
   })
 })

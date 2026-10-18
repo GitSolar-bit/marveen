@@ -1,5 +1,5 @@
 import {
-  createAgentMessage, getPendingMessages, listAgentMessages, getRecipientQueueState,
+  createAgentMessage, MESSAGE_KINDS, getPendingMessages, listAgentMessages, getRecipientQueueState,
   getAgentConversation, getAgentConversationThreads,
   getKanbanSeqByIdPrefix,
   markMessageDone, markMessageFailed, getAgentMessage,
@@ -158,8 +158,8 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
 
   if (path === '/api/messages' && method === 'POST') {
     const body = await readBody(req)
-    const { from, to, content, origin_note, priority, urgent } = JSON.parse(body.toString()) as
-      { from: string; to: string; content: string; origin_note?: string; priority?: unknown; urgent?: unknown }
+    const { from, to, content, origin_note, priority, urgent, kind } = JSON.parse(body.toString()) as
+      { from: string; to: string; content: string; origin_note?: string; priority?: unknown; urgent?: unknown; kind?: unknown }
     if (!from?.trim() || !to?.trim() || !content?.trim()) {
       json(res, { error: 'from, to, and content are required' }, 400)
       return true
@@ -172,6 +172,16 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     // typo does not silently send an ordinary row.
     if (urgent !== undefined && typeof urgent !== 'boolean') {
       json(res, { error: 'urgent must be a JSON boolean' }, 400)
+      return true
+    }
+    // Card 5e4110d7: `kind` says what the sender expects of the recipient: 'task' (default) or 'info' ("no reply
+    // needed", it does not hold the restart gate). Anyone may send either: 'info' can only make the gate QUIETER for
+    // the sender's own messages, and a message that matters gets sent as a task. A value that is neither is a 400, so a
+    // typo does not silently send an ordinary task.
+    // `kind: null` is "not given", like an absent key: a JSON serializer that writes every field as null must not start
+    // failing where it used to pass (Sam 3593, 2).
+    if (kind !== undefined && kind !== null && (typeof kind !== 'string' || !(MESSAGE_KINDS as readonly string[]).includes(kind))) {
+      json(res, { error: "kind must be 'task' or 'info'" }, 400)
       return true
     }
     if (urgent === true && !mayMarkUrgent(ctx.auth, URGENT_DEVICE_KEY_IDS)) {
@@ -434,7 +444,8 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       : rankedSenders().includes(from.trim())
         ? { priority: parsedPriority.level === 'high' ? 1 as const : 0 as const, downgraded: false }
         : decidePriority(parsedPriority.level, from.trim(), storedTo, Math.floor(Date.now() / 1000))
-    const msg = createAgentMessage(from.trim(), storedTo, normalizedContent, trimmedOriginNote, null, { urgent: urgent === true, priority: decided.priority })
+    // Card 5e4110d7: `kind` is the work-in-flight tag (info = no reply or action expected), independent of the priority.
+    const msg = createAgentMessage(from.trim(), storedTo, normalizedContent, trimmedOriginNote, null, { urgent: urgent === true, kind: kind === 'info' ? 'info' : 'task', priority: decided.priority })
     if (isVoiceMailbox) {
       markMessageDone(msg.id, VOICE_MAILBOX_RESULT)
       logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent }, 'Voice-channel answer stored in the mailbox (no session delivery)')

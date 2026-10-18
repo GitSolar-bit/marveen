@@ -53,39 +53,16 @@ import re
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ledger_lib  # noqa: E402
+from telegram_ack_lib import is_ack  # noqa: E402
 
 # Tunables (overridable via env for tests / ops).
 STALE_SECONDS = int(os.environ.get("TG_GUARD_STALE_SECONDS", "1800"))  # 30 min
 MAX_BLOCKS = int(os.environ.get("TG_GUARD_MAX_BLOCKS", "3"))
 
-# Pure acknowledgements that do NOT require a reply (standing rule #9). Kept
-# deliberately conservative so a short real question is never swallowed.
-_ACK_WORDS = (
-    "ok", "oke", "okk", "okés", "okes", "rendben", "rdb", "köszi", "koszi",
-    "kösz", "kosz", "köszönöm", "koszonom", "thx", "thanks", "ty", "thank you",
-    "szuper", "super", "remek", "tökéletes", "tokeletes", "jó", "jo", "oksa",
-)
-_EMOJI_ACK = ("👍", "🙏", "👌", "❤️", "👏", "🎉", "✅", "🆗", "+1")
-
-
-def _is_ack(text):
-    raw = (text or "").strip()
-    if not raw:
-        # An empty/attachment-only inbound (e.g. a bare photo) is not a question
-        # this guard should block on; the agent handles media on its own terms.
-        return True
-    # Strip emoji-ack glyphs and punctuation, then require EVERY remaining word to
-    # be an acknowledgement word. This catches "köszi 👍", "ok köszi", "👍", etc.,
-    # while still treating "ok de miért?" (a real question) as non-ack.
-    t = raw.lower()
-    for e in _EMOJI_ACK:
-        t = t.replace(e, " ")
-    for ch in ".!?…,":
-        t = t.replace(ch, " ")
-    tokens = t.split()
-    if not tokens:
-        return True  # emoji-only acknowledgement
-    return all(tok in _ACK_WORDS for tok in tokens)
+# The ack predicate lives in telegram_ack_lib so the placeholder-cleanup hooks
+# share the SAME definition. `_is_ack` stays as the name this hook (and its
+# tests) call.
+_is_ack = is_ack
 
 
 _CHANNEL_PROVIDERS = ("telegram", "discord", "slack", "googlechat", "teams")

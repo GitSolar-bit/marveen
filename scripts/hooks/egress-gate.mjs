@@ -33,6 +33,37 @@
 // The log is separate from the main Marveen log so operators can grep it
 // independently: `tail -f store/egress-blocked.log`
 //
+// THE PONDER TIER (kanban c1dc4109, owner decision TG 3041 #67, permission_change). One agent, the
+// research agent `agents/ponder`, may READ the public web without an allowlist: WebFetch to any
+// public http(s) URL, and Playwright navigation. Everybody else is byte-identical to before. It is
+// built from three parts, all of which must hold:
+//   1. IDENTITY: the payload's `transcript_path` lies under <install>/agents/ponder/.claude-config/
+//      AND the payload carries no `agent_type` / `agent_id` (the top-level session, not a helper it
+//      spawned). The path is written by the harness from the session's own isolated CLAUDE_CONFIG_DIR,
+//      which an agent cannot change from inside a session; a payload field the CALLER composes (cwd
+//      follows a `cd`, a prompt, a tool argument) is not used. Same basis as the destructive gate's
+//      own-workdir right (FLEETOWNDIR1003, _agent_from_transcript).
+//   2. SWITCH: store/egress-allowlist.json { "ponder_posture": "open" }. Only the literal string
+//      "open" opens it; anything else, including a missing key or file, is closed. Same shape as
+//      quarantine_reader_posture: an explicit per-install operator act, reported by the allowlist
+//      baseline watcher like every other change to that file.
+//   3. RULES, applied BEFORE every allow path: public http(s) only, no userinfo, ports 80/443 only, no
+//      IP literals, no internal/private/loopback/link-local/metadata hosts, no single-label names, and
+//      a URL length / query length cap. WebFetch is a GET-only tool by construction (its input is a
+//      url and a prompt, never a method or body), so reading is all it can do; the URL itself is the
+//      one thing a poisoned page could abuse to carry data OUT, hence the caps and the audit.
+// Playwright for Ponder (identity only, the switch is not needed because these are RESTRICTIONS): an
+// ALLOWLIST of reading tools (PONDER_BROWSER_ALLOWED), not a deny list: every other mcp__playwright__
+// tool is refused, so a tool a later package version adds is closed by default. The navigation URL (the
+// browser_navigate url, and the browser_tabs url of action "new", the second way @playwright/mcp 0.0.82
+// navigates) gets the same rules as WebFetch. browser_press_key passes only a key that prints nothing. Click, hover and press_key stay (they are how a page is
+// read), so the browser is NARROWER, not read-only: a click can submit a form the page itself prepared.
+// RESOLVED ADDRESS: for Ponder, a public-looking NAME is also resolved and refused when ANY address it
+// resolves to is non-public (ponderResolvedDenied). That is a point-in-time check on the hook's own
+// lookup: the tool resolves again when it fetches, so a name that answers differently the second time
+// (DNS rebinding) is NOT closed, and neither is a redirect or a navigation the PAGE starts.
+// EVERY Ponder call that reaches this hook, allowed or denied, is appended to store/ponder-egress.jsonl.
+//
 // Scope: this guard covers the Claude Code WebFetch tool only -- it is wired
 // with matcher "WebFetch" and sees no other tool. It does NOT intercept
 // WebSearch or MCP-server outbound requests.
@@ -45,10 +76,12 @@
 // docs/security-hardening.md. The two halves are deliberately separate: this
 // one decides on a URL, that one on a command string.
 
-import { readFileSync, appendFileSync, mkdirSync } from 'node:fs'
+import { readFileSync, appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import dns from 'node:dns'
+import { isIP } from 'node:net'
+import { dirname, join, normalize, sep } from 'node:path'
 
 // Derive repo root from this script's location (scripts/hooks/egress-gate.mjs).
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -252,6 +285,197 @@ function matchesQuarantineDomain(url, extraDomains = []) {
   return extraDomains.some(hostMatches)
 }
 
+// ---- the Ponder tier ----------------------------------------------------------------------
+const PONDER_AGENT = 'ponder'
+const PONDER_AUDIT_LOG = join(REPO_ROOT, 'store', 'ponder-egress.jsonl')
+// A whole URL, and its query, may not be long enough to smuggle a document out. Chosen from what
+// public research URLs look like (a search URL is well under 300 characters), not measured on
+// Ponder's own traffic, which does not exist yet; both are one-line constants for that reason.
+const PONDER_MAX_URL = 2048
+const PONDER_MAX_QUERY = 512
+// The ONLY Playwright tools Ponder may call: they read a page, move around it, or aim at a URL that gets
+// the rules below. Everything else is refused, including what puts data into a page (type,
+// press_sequentially, fill_form, select_option, check, keydown, file_upload, drop, handle_dialog), runs
+// code in it (evaluate, run_code_unsafe), writes browser state (cookie_set, localstorage_set,
+// sessionstorage_set, set_storage_state) or rewrites traffic (route, network_state_set), and the tools
+// that call into the page (webmcp_call). Adding a tool here is a one-line decision, made on purpose.
+const PONDER_BROWSER_ALLOWED = new Set([
+  'mcp__playwright__browser_navigate',
+  'mcp__playwright__browser_navigate_back',
+  'mcp__playwright__browser_navigate_forward',
+  'mcp__playwright__browser_reload',
+  'mcp__playwright__browser_tabs',          // action-checked below
+  'mcp__playwright__browser_close',
+  'mcp__playwright__browser_snapshot',
+  'mcp__playwright__browser_take_screenshot',
+  'mcp__playwright__browser_find',
+  'mcp__playwright__browser_wait_for',
+  'mcp__playwright__browser_console_messages',
+  'mcp__playwright__browser_network_requests',
+  'mcp__playwright__browser_network_request',
+  'mcp__playwright__browser_click',
+  'mcp__playwright__browser_hover',
+  'mcp__playwright__browser_press_key',
+])
+// browser_press_key types ANY character it is given ("a", "Shift+a"), one call per character, which would
+// empty the ban on type / press_sequentially. For Ponder only a key that PRINTS NOTHING is allowed, matched
+// exactly (case-sensitive, no modifier combos): they move around and submit, they do not enter text.
+const PONDER_KEYS_ALLOWED = new Set([
+  'Enter', 'Escape', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'Home', 'End',
+])
+// PONDERTYPECEG1008 (owner decision, Telegram 3821, 2026-10-08): ONE narrow exception to the ban on
+// putting text into a page. browser_type -- and nothing else from the deny list -- passes for Ponder ONLY
+// when (a) the last URL this gate let Ponder navigate to is on a host in PONDER_TYPE_HOSTS, recorded by the
+// runner below and younger than PONDER_TYPE_TTL_MS, and (b) the text is a short company name or registry
+// number (PONDER_TYPE_TEXT). The free search box of the Hungarian company registry needs typing, and the
+// search is a GET the page builds itself, so there is no URL to navigate to instead.
+// KNOWN LIMIT, stated: the recorded host is what the GATE allowed last, not what the page shows now. A link
+// clicked on the registry page, or a redirect, can move the tab elsewhere without the gate seeing it. The
+// text rule bounds what can be typed there: letters, digits, space and . , & ' - / ( ), at most 100 chars.
+export const PONDER_TYPE_HOSTS = new Set(['e-cegjegyzek.hu'])
+export const PONDER_TYPE_TTL_MS = 30 * 60 * 1000
+const PONDER_TYPE_TEXT = /^[\p{L}\p{N} .,&'\-\/()]{1,100}$/u
+const PONDER_TYPE_STATE = join(REPO_ROOT, 'store', '.ponder-browser-host.json')
+export function ponderTypeHostAllowed(host) {
+  const h = String(host ?? '').toLowerCase()
+  for (const d of PONDER_TYPE_HOSTS) if (h === d || h.endsWith('.' + d)) return true
+  return false
+}
+function readPonderLastHost(now = Date.now()) {
+  try {
+    const s = JSON.parse(readFileSync(PONDER_TYPE_STATE, 'utf-8'))
+    if (typeof s?.host !== 'string' || typeof s?.ts !== 'number' || now - s.ts > PONDER_TYPE_TTL_MS || s.ts > now) return ''
+    return s.host
+  } catch { return '' }
+}
+function writePonderLastHost(url) {
+  try {
+    const host = new URL(url).hostname
+    mkdirSync(dirname(PONDER_TYPE_STATE), { recursive: true })
+    writeFileSync(PONDER_TYPE_STATE, JSON.stringify({ host, ts: Date.now() }))
+  } catch { /* an unwritable state only keeps typing closed */ }
+}
+
+// browser_tabs: list, select, close and new. A new tab with a url navigates, so that url is judged.
+const PONDER_TABS_ACTIONS = new Set(['list', 'select', 'close', 'new'])
+
+// Who is calling: 'ponder' or ''. Fail-closed: every doubt is ''.
+export function callerIdentity(payload, root = REPO_ROOT) {
+  if (!payload || typeof payload !== 'object') return ''
+  if (payload.agent_type || payload.agent_id) return ''        // a helper, not the top-level session
+  const tp = payload.transcript_path
+  if (typeof tp !== 'string' || !tp.startsWith('/') || tp.includes('\0')) return ''
+  // The harness hands over a canonical path. One that changes under normalisation (`..`, `//`, `/./`)
+  // was not produced by it, and is not trusted.
+  if (normalize(tp) !== tp) return ''
+  const base = join(root, 'agents', PONDER_AGENT, '.claude-config') + sep
+  return tp.startsWith(base) ? 'ponder' : ''
+}
+
+// Why a URL is not a public, readable address -- or null. Used for Ponder only.
+export function ponderUrlDenied(url) {
+  let u
+  try { u = new URL(url) } catch { return 'unparseable' }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return 'scheme'
+  if (u.username || u.password) return 'userinfo'
+  const host = u.hostname.toLowerCase().replace(/\.$/, '')
+  if (!host) return 'no-host'
+  // The most specific reason first: an internal host is named as such even when it also carries a port.
+  if (isQuarantineDenied(url)) return 'internal-host'
+  if (host.includes(':') || /^\d+(\.\d+){0,3}$/.test(host) || /^0x/i.test(host)) return 'ip-literal'
+  if (!host.includes('.')) return 'single-label-host'
+  if (u.port && u.port !== '80' && u.port !== '443') return 'port'
+  if (String(url).length > PONDER_MAX_URL) return 'url-too-long'
+  if (u.search.length > PONDER_MAX_QUERY) return 'query-too-long'
+  return null
+}
+
+// ---- the resolved address (Ponder only) ---------------------------------------------------------
+// True when an address is not a public unicast one. Takes what a resolver returns (a v4 or v6 literal).
+export function isNonPublicAddress(addr) {
+  const kind = isIP(addr)
+  if (kind === 4) {
+    const [a, b, c] = addr.split('.').map(Number)
+    return a === 0 || a === 10 || a === 127 || a >= 224
+      || (a === 100 && b >= 64 && b <= 127)           // CGNAT
+      || (a === 169 && b === 254)                     // link-local, metadata
+      || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 168)
+      || (a === 192 && b === 0 && c === 0)            // IETF protocol assignments
+      || (a === 198 && (b === 18 || b === 19))        // benchmarking
+  }
+  if (kind === 6) {
+    // Expand to 8 groups so ::ffff:a00:1 and ::ffff:10.0.0.1 are the same thing.
+    let h = addr.toLowerCase().split('%')[0]
+    const dotted = /^(.*:)(\d+\.\d+\.\d+\.\d+)$/.exec(h)
+    if (dotted) {
+      const o = dotted[2].split('.').map(Number)
+      h = dotted[1] + ((o[0] << 8) | o[1]).toString(16) + ':' + ((o[2] << 8) | o[3]).toString(16)
+    }
+    const [head, tail = null] = h.split('::')
+    const hg = head ? head.split(':') : []
+    const tg = tail === null ? [] : (tail ? tail.split(':') : [])
+    const g = tail === null ? hg : [...hg, ...Array(Math.max(0, 8 - hg.length - tg.length)).fill('0'), ...tg]
+    if (g.length !== 8) return true                    // not parseable: refuse
+    const w = g.map((x) => parseInt(x, 16))
+    if (w.some((x) => Number.isNaN(x))) return true
+    const v4of = (hi, lo) => `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`
+    if (w.slice(0, 5).every((x) => x === 0) && (w[5] === 0xffff || w[5] === 0)) {
+      // v4-mapped / v4-compatible: judge the embedded v4. A bare :: or ::1 lands here as 0.0.0.0 / 0.0.0.1.
+      return isNonPublicAddress(v4of(w[6], w[7]))
+    }
+    // v4-translated (SIIT, ::ffff:0:a.b.c.d): the same, one group over.
+    if (w.slice(0, 4).every((x) => x === 0) && w[4] === 0xffff && w[5] === 0) return isNonPublicAddress(v4of(w[6], w[7]))
+    if (w[0] === 0x64 && w[1] === 0xff9b && w.slice(2, 6).every((x) => x === 0)) return isNonPublicAddress(v4of(w[6], w[7]))   // NAT64
+    if (w[0] === 0x64 && w[1] === 0xff9b && w[2] === 1) return true                       // 64:ff9b:1::/48, local-use NAT64: not global
+    if (w[0] === 0x2002) return isNonPublicAddress(v4of(w[1], w[2]))                       // 6to4: the v4 is in bits 16-47
+    if (w[0] === 0x2001 && w[1] === 0) {                                                   // Teredo: server v4 plain, client v4 XOR 0xffff
+      return isNonPublicAddress(v4of(w[2], w[3])) || isNonPublicAddress(v4of(w[6] ^ 0xffff, w[7] ^ 0xffff))
+    }
+    if ((w[0] & 0xfe00) === 0xfc00) return true       // unique-local
+    if ((w[0] & 0xffc0) === 0xfe80) return true       // link-local
+    if ((w[0] & 0xffc0) === 0xfec0) return true       // site-local (fec0::/10, deprecated, never global)
+    if ((w[0] & 0xff00) === 0xff00) return true       // multicast
+    return false
+  }
+  return true                                          // not an address at all
+}
+
+const PONDER_DNS_TIMEOUT_MS = 3000
+
+// Resolve the URL's host and refuse it when ANY address is non-public, or when it cannot be resolved
+// (fail closed: a name that does not resolve here would not be fetched either). `lookup` is a parameter
+// for tests. Returns a reason string or null. The tool resolves again later; see the header.
+export async function ponderResolvedDenied(url, lookup = (h) => dns.promises.lookup(h, { all: true })) {
+  let host
+  try { host = new URL(url).hostname.toLowerCase().replace(/\.$/, '') } catch { return 'unparseable' }
+  let timer
+  try {
+    const addrs = await Promise.race([
+      lookup(host),
+      new Promise((_, rej) => { timer = setTimeout(() => rej(Object.assign(new Error('timeout'), { code: 'ETIMEOUT' })), PONDER_DNS_TIMEOUT_MS) }),
+    ])
+    const list = Array.isArray(addrs) ? addrs : [addrs]
+    if (list.length === 0) return 'dns-unresolved'
+    for (const a of list) if (isNonPublicAddress(String(a?.address ?? ''))) return 'resolves-to-non-public'
+    return null
+  } catch (e) {
+    return e?.code === 'ETIMEOUT' ? 'dns-timeout' : 'dns-unresolved'
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// The URL a Ponder decision let through on the strength of its HOST, i.e. the one whose resolved address
+// must also be checked -- or ''. WebFetch via the Ponder tier, browser_navigate, and browser_tabs with a url.
+export function ponderJudgedUrl(toolName, toolInput, decision) {
+  if (!decision || decision.blocked) return ''
+  const url = typeof toolInput?.url === 'string' ? toolInput.url : ''
+  if (toolName === 'WebFetch') return decision.tier === 'ponder-open' ? url : ''
+  if (toolName === 'mcp__playwright__browser_navigate' || toolName === 'mcp__playwright__browser_tabs') return decision.tier === 'ponder-browser' ? url : ''
+  return ''
+}
+
 // Load the runtime allowlist from store/egress-allowlist.json.
 // FAIL-OPEN on the file: missing or malformed -> empty lists, NOT an error.
 // The caller must still apply the built-in ALLOWED_PREFIXES.
@@ -272,10 +496,12 @@ export function loadRuntimeAllowlist() {
       // the reader; any other value -- absent key, typo, wrong type -- is the
       // allowlist default. Fail-closed to the louder failure direction.
       quarantinePosture: parsed.quarantine_reader_posture === 'denylist' ? 'denylist' : 'allowlist',
+      // The Ponder switch: ONLY the literal "open" opens it (see the header).
+      ponderPosture: parsed.ponder_posture === 'open' ? 'open' : 'closed',
     }
   } catch {
     // Missing file or JSON parse error: treat as empty, never propagate.
-    return { domains: [], prefixes: [], quarantineDomains: [], quarantinePosture: 'allowlist' }
+    return { domains: [], prefixes: [], quarantineDomains: [], quarantinePosture: 'allowlist', ponderPosture: 'closed' }
   }
 }
 
@@ -298,10 +524,63 @@ export function egressDecision(
   toolInput,
   runtimeList = { domains: [], prefixes: [], quarantineDomains: [] },
   agentType = '',
+  caller = '',
+  ponderLastHost = '',
 ) {
+  // Playwright: only the Ponder identity is ever judged here; everybody else is unchanged (allowed).
+  if (typeof toolName === 'string' && toolName.startsWith('mcp__playwright__')) {
+    if (caller !== 'ponder') return { blocked: false, tier: 'not-webfetch' }
+    if (toolName === 'mcp__playwright__browser_type') {
+      const text = toolInput?.text
+      if (ponderTypeHostAllowed(ponderLastHost) && typeof text === 'string' && PONDER_TYPE_TEXT.test(text))
+        return { blocked: false, tier: 'ponder-browser-type' }
+      return { blocked: true, tier: 'ponder-denied', reason: 'browser-tool-not-allowed' }
+    }
+    if (!PONDER_BROWSER_ALLOWED.has(toolName)) return { blocked: true, tier: 'ponder-denied', reason: 'browser-tool-not-allowed' }
+    if (toolName === 'mcp__playwright__browser_navigate') {
+      const why = ponderUrlDenied(String(toolInput?.url ?? ''))
+      if (why) return { blocked: true, tier: 'ponder-denied', reason: why }
+      return { blocked: false, tier: 'ponder-browser' }
+    }
+    if (toolName === 'mcp__playwright__browser_press_key') {
+      const key = toolInput?.key
+      if (typeof key !== 'string' || !PONDER_KEYS_ALLOWED.has(key)) return { blocked: true, tier: 'ponder-denied', reason: 'browser-key-not-allowed' }
+      return { blocked: false, tier: 'ponder-browser' }
+    }
+    if (toolName === 'mcp__playwright__browser_tabs') {
+      const action = toolInput?.action
+      if (typeof action !== 'string' || !PONDER_TABS_ACTIONS.has(action)) return { blocked: true, tier: 'ponder-denied', reason: 'browser-tabs-action' }
+      // A url on any action is judged, not only on "new": the tool ignores it elsewhere today, and a
+      // later version that does not is closed by default.
+      if (toolInput?.url !== undefined && toolInput?.url !== null && toolInput?.url !== '') {
+        const why = ponderUrlDenied(typeof toolInput.url === 'string' ? toolInput.url : '')
+        if (why) return { blocked: true, tier: 'ponder-denied', reason: why }
+      }
+      return { blocked: false, tier: 'ponder-browser' }
+    }
+    return { blocked: false, tier: 'ponder-browser' }
+  }
   if (toolName !== 'WebFetch') return { blocked: false, tier: 'not-webfetch' }
   const url = String(toolInput?.url ?? '')
   if (!url) return { blocked: false, tier: 'no-url' }
+
+  // 00. The Ponder tier, rules first: they run BEFORE every allow path, so a built-in prefix (this
+  //     install's own dashboard, http://localhost:PORT/) cannot re-open what the rules wall off. Only for
+  //     the identified caller AND the operator switch; everyone else never reaches this block (a closed
+  //     switch still refuses internal hosts to the Ponder session, below).
+  const ponderOpen = caller === 'ponder' && (runtimeList.ponderPosture ?? 'closed') === 'open'
+  if (ponderOpen) {
+    const why = ponderUrlDenied(url)
+    if (why) return { blocked: true, tier: 'ponder-denied', reason: why }
+  } else if (caller === 'ponder') {
+    // PONDERTIER1003 v4: with the switch CLOSED the Ponder session is still the Ponder session, and the
+    // built-in grants below (this install's own dashboard, http://localhost:PORT/, is one) are for the
+    // other agents' jobs. The research agent never has a reason to read an internal address, so an
+    // internal host or an IP literal is refused for it whatever the switch says. Public names keep the
+    // old behaviour exactly (a closed switch opens nothing, and closes nothing it did not close before).
+    const why = ponderUrlDenied(url)
+    if (why === 'internal-host' || why === 'ip-literal') return { blocked: true, tier: 'ponder-denied', reason: why }
+  }
 
   const openReader = String(agentType ?? '') === QUARANTINE_AGENT_TYPE
     && (runtimeList.quarantinePosture ?? 'allowlist') === 'denylist'
@@ -366,12 +645,15 @@ export function egressDecision(
     }
   }
 
+  // 5. The Ponder tier: whatever the rules above did not refuse, a public URL, is readable.
+  if (ponderOpen) return { blocked: false, tier: 'ponder-open' }
+
   return { blocked: true, tier: 'none' }
 }
 
 // Back-compatible boolean form.
-export function isEgressBlocked(toolName, toolInput, runtimeList, agentType) {
-  return egressDecision(toolName, toolInput, runtimeList, agentType).blocked
+export function isEgressBlocked(toolName, toolInput, runtimeList, agentType, caller) {
+  return egressDecision(toolName, toolInput, runtimeList, agentType, caller).blocked
 }
 
 // The payload's top-level FIELD NAMES, sorted -- never a value.
@@ -428,6 +710,45 @@ function logLine(kind, url, detail, keys = '', agentType = '') {
   }
 }
 
+// Every Ponder call that reaches the gate, allowed or denied, one JSON object per line. The full URL
+// IS logged (it is the thing under audit: a URL that carries data out is only findable if it is kept),
+// so this file is as private as store/ itself. Never logged: the WebFetch `prompt`, page content.
+export function ponderAuditLine(payload, decision, ts = new Date().toISOString()) {
+  const url = String(payload?.tool_input?.url ?? '')
+  let host = '', queryLen = 0
+  try { const u = new URL(url); host = u.hostname; queryLen = u.search.length } catch { /* not a url */ }
+  return JSON.stringify({
+    ts,
+    ...(SELFTEST ? { selftest: true } : {}),
+    session: String(payload?.session_id ?? ''),
+    tool: String(payload?.tool_name ?? ''),
+    decision: decision.blocked ? 'deny' : 'allow',
+    tier: decision.tier,
+    ...(decision.reason ? { reason: decision.reason } : {}),
+    host,
+    url,
+    url_len: url.length,
+    query_len: queryLen,
+  })
+}
+
+function auditPonder(payload, decision) {
+  try {
+    mkdirSync(join(REPO_ROOT, 'store'), { recursive: true })
+    appendFileSync(PONDER_AUDIT_LOG, ponderAuditLine(payload, decision) + '\n', 'utf-8')
+  } catch {
+    // An audit failure must not turn into a block or an allow of its own: the decision stands.
+  }
+}
+
+const PONDER_DENY_MESSAGE = (reason) =>
+  'Egress TILTOTT (egress-gate hook, Ponder-szint). Ponder csak NYILVANOS web-cimet olvashat: http(s), ' +
+  'felhasznalonev nelkul, 80/443-as porton, nev szerint (nem IP-cimre, nem belso hosztra), legfeljebb ' +
+  `${PONDER_MAX_URL} karakteres URL-lel, ${PONDER_MAX_QUERY} karakteres lekerdezessel; a bongeszoben csak ` +
+  `az engedelyezett olvaso eszkozok mennek (navigate, snapshot, screenshot, find, click, ...), es a nev ` +
+  `feloldott cime is nyilvanos kell legyen. A kapu oka: ${reason}. ` +
+  'A hivas rogzitve lett a store/ponder-egress.jsonl fajlban.'
+
 const BLOCK_MESSAGE =
   'Egress TILTOTT (egress-gate hook). Ez az URL nem szerepel a fő ágens WebFetch ' +
   'engedélylistáján. Külső web-tartalom (RSS, dokumentáció, cikkek, ismeretlen API-k) ' +
@@ -471,7 +792,29 @@ if (isInvokedDirectly()) {
   const url = String(payload?.tool_input?.url ?? '')
   const agentType = String(payload?.agent_type ?? '')
   const runtimeList = loadRuntimeAllowlist()
-  const decision = egressDecision(payload?.tool_name, payload?.tool_input, runtimeList, agentType)
+  const caller = callerIdentity(payload)
+  const decision = egressDecision(payload?.tool_name, payload?.tool_input, runtimeList, agentType, caller,
+    caller === 'ponder' && payload?.tool_name === 'mcp__playwright__browser_type' ? readPonderLastHost() : '')
+  // The rules above judged the NAME; for the Ponder tier the address the name resolves to is judged too.
+  let finalDecision = decision
+  if (caller === 'ponder') {
+    const judged = ponderJudgedUrl(payload?.tool_name, payload?.tool_input, decision)
+    if (judged) {
+      const why = await ponderResolvedDenied(judged)
+      if (why) finalDecision = { blocked: true, tier: 'ponder-denied', reason: why }
+    }
+  }
+  if (caller === 'ponder' && (payload?.tool_name === 'WebFetch' || String(payload?.tool_name ?? '').startsWith('mcp__playwright__'))) {
+    auditPonder(payload, finalDecision)
+  }
+  if (finalDecision !== decision) {
+    logLine('BLOCKED', url, `reason="ponder: ${finalDecision.reason}"`, payloadKeySignature(payload), agentType)
+    deny(PONDER_DENY_MESSAGE(finalDecision.reason))
+  }
+  if (decision.blocked && decision.tier === 'ponder-denied') {
+    logLine('BLOCKED', url, `reason="ponder: ${decision.reason}"`, payloadKeySignature(payload), agentType)
+    deny(PONDER_DENY_MESSAGE(decision.reason))
+  }
   if (decision.blocked) {
     logLine('BLOCKED', url, 'reason="not on egress allowlist"', payloadKeySignature(payload), agentType)
     deny(BLOCK_MESSAGE)
@@ -481,6 +824,13 @@ if (isInvokedDirectly()) {
   // other tiers are the ordinary allowlist and stay quiet.
   if (decision.tier === 'quarantine') {
     logLine('ALLOWED_QUARANTINE', url, 'reason="quarantine-reader tier"', '', agentType)
+  }
+  // PONDERTYPECEG1008: remember where the gate last let Ponder go, for the browser_type exception.
+  if (caller === 'ponder') {
+    const tn = payload?.tool_name
+    const navUrl = tn === 'mcp__playwright__browser_navigate' ? payload?.tool_input?.url
+      : (tn === 'mcp__playwright__browser_tabs' && payload?.tool_input?.action === 'new') ? payload?.tool_input?.url : undefined
+    if (typeof navUrl === 'string' && navUrl) writePonderLastHost(navUrl)
   }
   allow()
 }

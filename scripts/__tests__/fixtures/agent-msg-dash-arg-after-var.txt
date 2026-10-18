@@ -1,0 +1,7 @@
+cd /home/u/marveen; T="Authorization: Bearer $(cat store/.dashboard-token)"; for i in 1 2; do curl -s -X PUT http://localhost:3420/api/messages/$i -H "Content-Type: application/json" -H "$T" --data-binary '{"status":"done"}'; echo; done
+cat <<'EOF' | bash scripts/agent-msg.sh zola sam -
+message body
+EOF
+python3 - <<'EOF'
+print(1)
+EOF

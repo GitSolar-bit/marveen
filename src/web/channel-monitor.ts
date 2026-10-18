@@ -57,7 +57,7 @@ import {
 } from '../pane-state.js'
 import { MAIN_CHANNELS_SESSION, MAIN_CHANNELS_PLIST } from './main-agent.js'
 import { recordChannelEvent } from './channel-event-log.js'
-import { notifyChannel } from '../notify.js'
+import { notifyChannel, scrubForLog } from '../notify.js'
 import { sendRoutineAlert } from './routine-alert.js'
 import { getProvider, channelStateDir, channelStateDirEnvVar, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
 import { attemptChannelMcpReconnect } from './channel-mcp-reconnect.js'
@@ -2042,7 +2042,11 @@ function checkMainKeepaliveStaleness(): void {
 }
 
 export function sendAlert(text: string): void {
-  notifyChannel(text).catch(() => {})
+  // ALERTVAK923 (card c1445b93): notifyChannel logs the delivery outcome itself; what reaches this catch is
+  // an exception it did not handle, and that must not vanish: the alert was lost and nothing else says so.
+  notifyChannel(text).catch((err) => {
+    logger.warn({ err: scrubForLog(err instanceof Error ? err.message : String(err), ''), preview: scrubForLog(String(text).replace(/\s+/g, ' '), '').slice(0, 80) }, 'sendAlert: a riasztas kikuldese kivetellel bukott -- a riasztas elveszett')
+  })
 }
 
 async function handleMarveenDown(): Promise<void> {

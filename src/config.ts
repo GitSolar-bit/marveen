@@ -83,41 +83,12 @@ function isUsableCronTz(tz: string): boolean {
   }
 }
 
-// APP_TZ has a SECOND consumer: every display path formats with
-// Intl.DateTimeFormat / toLocaleString({ timeZone: APP_TZ }), and one of them
-// (heartbeat-header-stamp.ts) builds its formatter at MODULE LOAD, on the
-// dashboard's static import chain. So the probe is both consumers, each asked
-// its own question, never one standing in for the other. They do disagree:
-// under TZ='' Node 22 reports the host zone as "Etc/Unknown", which
-// cron-parser schedules against without complaint and Intl rejects with a
-// RangeError -- and a RangeError at import time means the dashboard does not
-// start at all (ISSUE1895 review).
-function isUsableAppTz(tz: string): boolean {
-  if (!isUsableCronTz(tz)) return false
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: tz })
-    return true
-  } catch {
-    return false
-  }
-}
-
-// The host zone as APP_TZ may use it: the process zone when both consumers
-// accept it, otherwise UTC (the zone Intl itself falls back to with no TZ).
-// Never a value either consumer throws on.
-export function usableHostTz(
-  raw: string = Intl.DateTimeFormat().resolvedOptions().timeZone,
-): string {
-  return isUsableAppTz(raw) ? raw : 'UTC'
-}
-
 export function resolveAppTz(
   configured: string | undefined,
   systemTz: string = Intl.DateTimeFormat().resolvedOptions().timeZone,
 ): { tz: string; configured?: string; invalid?: string } {
-  const host = usableHostTz(systemTz)
-  if (!configured) return { tz: host }
-  if (!isUsableAppTz(configured)) return { tz: host, invalid: configured }
+  if (!configured) return { tz: systemTz }
+  if (!isUsableCronTz(configured)) return { tz: systemTz, invalid: configured }
   return { tz: configured, configured }
 }
 

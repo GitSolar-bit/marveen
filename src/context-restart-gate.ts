@@ -310,6 +310,45 @@ export function nextBlockClock(
   return firstBlockedAt ?? nowMs
 }
 
+/**
+ * RIASZTALLIT924: the sweeps of the current streak that could not read the context size. The streak clock
+ * runs through them (see nextBlockClock), so the alert must be able to say how many of its minutes were
+ * not measured. Only counts while a streak is running; a cleared clock zeroes it.
+ */
+export function nextUnmeasuredTicks(
+  previous: number,
+  contextTokens: number | null,
+  clockAfter: number | null,
+): number {
+  if (clockAfter === null) return 0
+  return contextTokens === null ? previous + 1 : previous
+}
+
+/**
+ * RIASZTALLIT924: the extra sentence of a persistent-block alert once the streak is long. It used to say
+ * "the same reason for N minutes, so this will probably not clear by itself", but N is the time the context
+ * stayed ABOVE THE THRESHOLD (nextBlockClock), not the time the block REASON stayed the same: the reason
+ * string changes freely underneath (a child process dies, another starts) while the clock runs on. Measured
+ * 2026-09-24: 16 gaps over 120 s in one working day inside a 5.9-hour streak. The sentence now claims what
+ * the clock measures, names the current reason as the current one, and says how many sweeps of the streak
+ * were not measured. Returns '' while the streak is shorter than neverClearsMin.
+ */
+export function blockAlertEscalation(
+  blockedSinceMin: number | '?',
+  reason: string,
+  unmeasuredTicks: number,
+  neverClearsMin: number,
+): string {
+  if (typeof blockedSinceMin !== 'number' || blockedSinceMin < neverClearsMin) return ''
+  const unmeasured = unmeasuredTicks > 0
+    ? ` A(z) ${blockedSinceMin} percbol ${unmeasuredTicks} ellenorzesnel nem volt kontextus-meres (azok a percek is beleszamolnak).`
+    : ''
+  return ` FIGYELEM: a kontextus ${blockedSinceMin} perce folyamatosan a kuszob folott all, es a kapu azota nem nyilt ki. `
+    + `A mostani ok (${reason}) nem biztos, hogy ennyi ideje ugyanaz: a kapu a kuszob folytonossagat meri, az ok valtozasat nem koveti.`
+    + unmeasured
+    + ` Nezd meg, mi tartja most, mielott tovabb varsz.`
+}
+
 // ---- Wake nudge after a /clear ----------------------------------------------
 //
 // A /clear leaves a fresh session that holds the injected SessionStart context

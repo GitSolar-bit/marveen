@@ -382,7 +382,7 @@ describe('marveen-commands.py', () => {
       p.stdin.end(JSON.stringify({ prompt: channel('mesélj', 'source="plugin:telegram:telegram" chat_id="42" message_id="32" user="owner"'), session_id: 'sid-2' }))
     })
     expect(calls.some(c => c.path === '/botbot-tok/deleteMessage')).toBe(false)
-    expect(JSON.parse(readFileSync(join(stateDir, 'progress', 'sid-2.json'), 'utf-8'))).toEqual([{ chat_id: '42', message_id: 555, src_mid: '32' }])
+    expect(JSON.parse(readFileSync(join(stateDir, 'progress', 'sid-2.json'), 'utf-8'))).toEqual([{ chat_id: '42', message_id: 555, src_mid: '32', ack: false }])
     rmSync(join(stateDir, 'progress', 'sid-2.json'), { force: true })
   })
 
@@ -393,7 +393,7 @@ describe('marveen-commands.py', () => {
     await runProgress(channel('mesélj', 'source="plugin:telegram:telegram" chat_id="42" message_id="33" user="owner"'), 'sid-3')
     expect(calls.filter(c => c.path === '/botbot-tok/sendMessage').map(c => c.body))
       .toEqual([{ chat_id: '42', text: '✍️ Dolgozom rajta…', disable_notification: true }])
-    expect(JSON.parse(readFileSync(join(stateDir, 'progress', 'sid-3.json'), 'utf-8'))).toEqual([{ chat_id: '42', message_id: 555, src_mid: '33' }])
+    expect(JSON.parse(readFileSync(join(stateDir, 'progress', 'sid-3.json'), 'utf-8'))).toEqual([{ chat_id: '42', message_id: 555, src_mid: '33', ack: false }])
     rmSync(join(stateDir, 'progress', 'sid-3.json'), { force: true })
   })
 
@@ -402,7 +402,7 @@ describe('marveen-commands.py', () => {
     await runProgress(channel('mesélj', TOPIC_ATTRS), 'sid-4')
     expect(calls.filter(c => c.path === '/botbot-tok/sendMessage').map(c => c.body))
       .toEqual([{ chat_id: '42', text: '✍️ Dolgozom rajta…', disable_notification: true, message_thread_id: 12 }])
-    expect(JSON.parse(readFileSync(join(stateDir, 'progress', 'sid-4.json'), 'utf-8'))).toEqual([{ chat_id: '42', message_id: 555, src_mid: '7', message_thread_id: 12 }])
+    expect(JSON.parse(readFileSync(join(stateDir, 'progress', 'sid-4.json'), 'utf-8'))).toEqual([{ chat_id: '42', message_id: 555, src_mid: '7', ack: false, message_thread_id: 12 }])
     rmSync(join(stateDir, 'progress', 'sid-4.json'), { force: true })
   })
 

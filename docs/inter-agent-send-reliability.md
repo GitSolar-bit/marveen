@@ -23,11 +23,38 @@ with HTTP 200). Verify the HTTP status **and** the returned id, and resend if mi
 
 ## The fix
 - `scripts/agent-msg.sh <from> <to> "<content>"` — builds the JSON body with `json.dumps` (no quoting
-  pitfalls), checks HTTP status + `id`, retries up to 3×, logs failures to `store/agent-msg-failures.log`.
-  Large/multi-line content may come from STDIN with a `-` third arg. Base dir is auto-detected, port from
+  pitfalls **after the helper starts**), checks HTTP status + `id`, retries up to 3×, logs failures to
+  `store/agent-msg-failures.log`. Large/multi-line content may come from STDIN with a `-` third arg.
+  **What it cannot see is what your shell did to the argument first**: in double quotes a `` `backtick word` ``
+  and a `$(command)` are executed by the calling shell and replaced by their output (measured: a hook name
+  and a command name silently vanished from a real message, card 639c7ba5), `$VAR` is expanded, and a backslash
+  before `$`, a backtick, `"`, `\` or a newline is eaten (`C:\temp` survives, `\$HOME` becomes a literal
+  `$HOME`). Text that carries any of these goes through STDIN with a quoted heredoc delimiter,
+  `bash scripts/agent-msg.sh <from> <to> - <<'MSG'`, which expands nothing. Two limits of that route: a line
+  of the text that is exactly the delimiter (`MSG`) ends the heredoc there, and everything after it RUNS AS
+  A SHELL COMMAND in the calling shell while the helper reports OK for the shortened message, so a message
+  that quotes this very pattern needs another delimiter or `- < file`; and empty lines at the END of the text
+  are dropped. Base dir is auto-detected, port from
   `MARVEEN_WEB_PORT` (default 3420), so it runs from any CWD / any install.
 - The generated agent `CLAUDE.md` (from `templates/CLAUDE.md.template`) now documents this rule and points
   at the helper, so every agent in every fleet verifies its sends by default.
+
+## Messages that need no reply: `--info`
+Card 5e4110d7. The context-restart gate treats a message you sent that is still pending or delivered as work in
+flight, and holds an agent's restart for it. A task is closed with a result, so that is right for tasks. A
+conversational message ("FYI", a status, a thank-you, "no reply needed") is never closed, so it held the gate for the
+whole staleness window (measured 2026-10-13: 6 delivered, never-closed messages from the main agent in two hours).
+Say so when you send it:
+
+    bash scripts/agent-msg.sh --info <from> <to> "Tajekoztato, valasz nem kell."
+
+- **`--info` must be the first argument.** It sends `"kind":"info"` in the POST; over the API the same is the
+  `kind` field (`"task"` is the default, `"info"`; `null` counts as not given, anything else is a 400).
+- **A message that needs no reply goes with `--info`.** A delegated task, a question, or anything you expect a result
+  or an answer for goes WITHOUT it. Leaving the switch out is always safe: an unmarked message is a task and counts
+  exactly as it always did.
+- `--info` only affects what is counted as work in flight: the restart gate, and the dashboard queue view's "waiting for an answer" block, which uses the same count. Delivery, the queue, the recipient's view of the message and its
+  closing (`PUT /api/messages/<id>`, `"notify":false` for a report) are unchanged.
 
 ## Belt-and-suspenders
 For delegated tasks, pairing the callback with a **DONE-marker file** (written as the final step) lets the

@@ -157,6 +157,46 @@ def main():
     d, _r, _ = run_hook(db)
     check("ack control: a later question on the same DB blocks", d, "block")
 
+    # 3b. A NUMBERED short reply is NOT an ack. The owner numbers every reply
+    #     (daily item numbering) and "86. ok" was a bare acknowledgement one day
+    #     and the DECISION that started an assignment on another (measured
+    #     2026-09-30, Telegram 2554): the text cannot tell them apart, so a
+    #     reply is owed. CONTROL: the same words without the number are still acks.
+    for i, numbered in enumerate(["118 ok", "86. ok", "104: ok", "7) ok", "118 👍", "2 köszi"]):
+        db = fresh_db()
+        lib = load_lib(db)
+        lib.log_inbound(AGENT, "8695313113", f"11{i:02d}", numbered, "2026-08-02T22:05:00.000Z")
+        d, _r, _ = run_hook(db)
+        check(f"numbered short reply {numbered!r} blocks", d, "block")
+    for i, plain in enumerate(["ok", "köszi", "ok 👍", "rendben"]):
+        db = fresh_db()
+        lib = load_lib(db)
+        lib.log_inbound(AGENT, "8695313113", f"13{i:02d}", plain, "2026-08-02T22:05:00.000Z")
+        d, _r, _ = run_hook(db)
+        check(f"control: unnumbered ack {plain!r} allows", d, None)
+
+    # 3c. A question mark ANYWHERE means a question, never an ack. Stripping
+    #     the "?" as punctuation used to let "jó?" / "ok?" through as acks.
+    #     Numbered decisions and questions block as before.
+    for i, real in enumerate(["jó?", "ok?", "118 jo?", "ok？", "igen", "mehet", "91 igen", "115 mehet",
+                              "104 ok de mikor?", "118", "118.", "118ok", "3.5 ok"]):
+        db = fresh_db()
+        lib = load_lib(db)
+        lib.log_inbound(AGENT, "8695313113", f"12{i:02d}", real, "2026-08-02T22:05:00.000Z")
+        d, _r, _ = run_hook(db)
+        check(f"non-ack {real!r} blocks", d, "block")
+
+    # 3d. The predicate itself, table form, through the name the hook exposes
+    #     (which is the shared telegram_ack_lib.is_ack).
+    _g = load_guard()
+    import telegram_ack_lib
+    check("hook _is_ack IS the shared predicate", _g._is_ack is telegram_ack_lib.is_ack, True)
+    for text, want in [("igen", False), ("mehet", False), ("ok", True), ("köszi", True), ("", True), ("köszi 👍", True), ("👍", True),
+                       ("118 ok", False), ("86. ok", False), ("91 igen", False),
+                       ("ok de miért?", False), ("jó?", False), ("👍?", False),
+                       ("ok？", False), ("1 2 ok", False), ("(photo)", False)]:
+        check(f"is_ack({text!r})", _g._is_ack(text), want)
+
     # 4. Stale (older than STALE_SECONDS) unanswered question -> ALLOW
     db = fresh_db()
     lib = load_lib(db)

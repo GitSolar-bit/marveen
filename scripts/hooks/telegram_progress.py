@@ -18,6 +18,9 @@ hook correct even if installed globally across agents with different bots.
 """
 import sys, os, json, re, urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from telegram_ack_lib import is_ack  # noqa: E402
+
 PLACEHOLDER = "✍️ Dolgozom rajta…"   # ✍️ Dolgozom rajta…
 REACTION = "✍️"                            # ✍️
 
@@ -99,7 +102,13 @@ def main():
     transcript_path = ev.get("transcript_path") or ""
     sd = state_dir()
 
-    blocks = re.findall(r'<channel\b[^>]*\bsource="[^"]*telegram[^"]*"[^>]*>', prompt)
+    # (tag, text) per inbound block. The text runs to the closing tag, or to the
+    # next block / end of prompt when the closing tag is missing.
+    found = re.findall(
+        r'(<channel\b[^>]*\bsource="[^"]*telegram[^"]*"[^>]*>)(.*?)(?=</channel>|<channel\b|\Z)',
+        prompt, re.DOTALL)
+    blocks = [tag for tag, _ in found]
+    texts = [txt for _, txt in found]
     if not blocks:
         return  # not a telegram turn — stay silent
     log(sd, f"[submit] sid={sid} blocks={len(blocks)} state_dir={sd}")
@@ -110,7 +119,7 @@ def main():
         return
 
     pending = []
-    for b in blocks:
+    for b, inbound_text in zip(blocks, texts):
         cid = re.search(r'\bchat_id="([^"]+)"', b)
         mid = re.search(r'\bmessage_id="([^"]+)"', b)
         # A topic message (TELEGRAM_TOPICS_ENABLED): the placeholder goes into
@@ -133,6 +142,18 @@ def main():
             pmid = resp.get("result", {}).get("message_id")
             if pmid:
                 entry = {"chat_id": chat_id, "message_id": pmid, "src_mid": src_mid, **thread}
+                # A pure acknowledgement owes no reply: the Stop hook must not
+                # nudge or fallback-send for it, and a reaction counts as the
+                # answer. Recorded here because this is the only hook that sees
+                # the inbound text. An entry without the key (written before
+                # this change) is treated as NOT an ack: the old enforcement.
+                # An EMPTY text only counts as an ack when the tag carries an
+                # attachment (a bare photo); an empty text with no attachment is
+                # more likely a parse miss than an ack, and a parse miss must
+                # keep the enforcement, not lift it.
+                has_media = re.search(r'\b(?:image_path|attachment_\w+)=', b) is not None
+                text_clean = inbound_text.strip()
+                entry["ack"] = bool(is_ack(text_clean)) if text_clean else has_media
                 if transcript_path:
                     entry["transcript_path"] = transcript_path
                 pending.append(entry)

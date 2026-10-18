@@ -68,10 +68,15 @@ describe('nap-zaro SKILL.md step-2: uj + frissitett emlekek (NAPZAROFRISS918)', 
         res.end('{}')
       }
     })
-    // the shipped script connects to "localhost", which this environment resolves to
-    // ::1 first (IPv6) -- bind there explicitly instead of 127.0.0.1, or the python
-    // process tries the wrong address family first.
-    await new Promise<void>((resolve) => server.listen(0, '::1', resolve))
+    // The shipped script connects to "localhost", and what that name resolves to depends on the machine:
+    // ::1 first on some (the reason this once bound ::1 only), 127.0.0.1 only on others (measured 2026-09-25 on
+    // this one: three AF_INET rows, no IPv6 row, so a ::1-only stub gave "Connection refused" and two tests were
+    // permanently red, card 23b64775). A dual-stack listener on "::" answers on BOTH loopback addresses; where
+    // the host has no IPv6 at all the bind fails and the stub falls back to 0.0.0.0.
+    await new Promise<void>((resolve) => {
+      server.once('error', () => server.listen(0, '0.0.0.0', resolve))
+      server.listen(0, '::', resolve)
+    })
     port = (server.address() as { port: number }).port
   })
 

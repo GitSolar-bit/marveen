@@ -99,6 +99,20 @@ def main():
         check('an answer without a queue field (an older server): exactly the old OK line, nothing on stderr',
               rc == 0 and out == 'OK id=13' and err == '', 'rc=%d out=%r err=%r' % (rc, out, err[:80]))
 
+        # Both leading switches (the --info of card 5e4110d7 and this card's --priority), in either order.
+        for name, args in (('--info --priority high', ['--info', '--priority', 'high', 'kuldo', 'cel', 'x']),
+                           ('--priority=high --info', ['--priority=high', '--info', 'kuldo', 'cel', 'x'])):
+            rc, out, err, reqs = run(args)
+            check('both switches (%s): kind=info AND priority=high in the body, content intact' % name,
+                  rc == 0 and len(reqs) == 1 and reqs[0].get('kind') == 'info' and reqs[0].get('priority') == 'high'
+                  and reqs[0].get('content') == 'x' and reqs[0].get('from') == 'kuldo' and reqs[0].get('to') == 'cel',
+                  'rc=%d out=%r requests=%r' % (rc, out, reqs))
+        rc, out, err, reqs = run(['--info', 'kuldo', 'cel', 'x'])
+        check('--info alone: kind=info and no priority key',
+              rc == 0 and len(reqs) == 1 and reqs[0].get('kind') == 'info' and 'priority' not in reqs[0], 'requests=%r' % (reqs,))
+        rc, out, err, reqs = run(['--priority', 'high', 'kuldo', 'cel', 'x'])
+        check('--priority alone: no kind key (a task)', rc == 0 and len(reqs) == 1 and 'kind' not in reqs[0], 'requests=%r' % (reqs,))
+
         # The refused forms: a non-zero exit, a FAIL line, and NOTHING sent.
         refused = [
             ('an unknown value', ['--priority', 'urgent', 'kuldo', 'cel', 'x']),

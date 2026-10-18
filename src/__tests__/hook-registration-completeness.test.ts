@@ -66,6 +66,8 @@ const EXEMPT: Record<string, string> = {
     'shared library imported by clear-capture.py / clear-replay.py; not itself a hook',
   'memory_frontmatter_lib.py':
     'shared library: the one memory-frontmatter check, imported by memory-frontmatter-gate.py (Write/Edit) and memory-frontmatter-bash-gate.py (Bash, KAPUEGYUT918); not itself a hook',
+  'telegram_ack_lib.py':
+    'shared library: the one "is this inbound a pure acknowledgement" predicate, imported by telegram-reply-guard.py, telegram_progress.py, telegram_progress_clear.py and telegram_progress_reply_clear.py; not itself a hook',
   'email_extract.py':
     'shared library imported by outgoing-copy-gate.py (and the level-2 email approval gate, EMAILKAPU901 PR2); not itself a hook',
   'credential_lib.py':
@@ -122,6 +124,8 @@ function registrationCorpus(): string {
 // every agent. Keep every reason concrete and sourced (docstring, docs, PR):
 // a "misc" entry here would re-open exactly the blind spot this split closes.
 const CHECKOUT_ONLY: Record<string, string> = {
+  'napi-szamozas-reply-watch.py':
+    "main-agent only, deliberately NOT seeded (card 572dbd49): a warn-only PreToolUse watcher on the channel reply for this install's owner's daily continuous item numbering; the counter store/napi-szamozas.json and the rule (the owner, 2026-09-24, reconfirmed 2026-10-11) belong to this install's main agent, and a seeded copy would warn every customer install against a counter it never keeps",
   'email-approval-gate.py':
     'level-aware email gate for the MAIN agent (EMAILKAPU901 PR2, #1149): its docstring scopes it to sessions rooted at PROJECT_ROOT, and sub-agents keep their unconditional hard-deny (email-send-gate.mjs), behind which this gate would be a no-op',
   'inbox-drain.py':

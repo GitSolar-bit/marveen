@@ -7315,7 +7315,8 @@ let currentLogDate = new Date().toISOString().split('T')[0]
 let logDates = []
 
 const tierLabels = { hot: '\u{1F525} Hot', warm: '\u{1F321}\uFE0F Warm', cold: '\u2744\uFE0F Cold', shared: '\u{1F517} Shared' }
-const tierColors = { hot: '#dc3c3c', warm: '#d97757', cold: '#6a9bcc', shared: '#9a8a30' }
+// CSS custom properties, so the stat numbers follow the theme (same tokens as the recall view)
+const tierColors = { hot: 'var(--tier-hot)', warm: 'var(--tier-warm)', cold: 'var(--tier-cold)', shared: 'var(--tier-shared)' }
 
 // Populate agent dropdowns from API
 async function loadMemAgents() {
@@ -7614,18 +7615,31 @@ let graphZoomIndicatorTimer = null
 // Edge animation
 let graphAnimFrame = 0
 
+// Canvas cannot use var(); renderGraph() refreshes these from the --tier-* tokens every frame,
+// so a theme switch is picked up. The literals are the light-theme values, used only if a token is missing.
 const GRAPH_TIER_COLORS = {
-  hot: '#dc3c3c',
-  warm: '#d97757',
-  cold: '#6a9bcc',
-  shared: '#b0a040',
+  hot: '#e32650',
+  warm: '#b45309',
+  cold: '#1a6df4',
+  shared: '#6d28d9',
 }
 
 const GRAPH_TIER_BG = {
-  hot: 'rgba(220, 60, 60, 0.06)',
-  warm: 'rgba(217, 119, 87, 0.06)',
-  cold: 'rgba(106, 155, 204, 0.06)',
-  shared: 'rgba(176, 160, 64, 0.06)',
+  hot: 'rgba(227, 38, 80, 0.06)',
+  warm: 'rgba(180, 83, 9, 0.06)',
+  cold: 'rgba(26, 109, 244, 0.06)',
+  shared: 'rgba(109, 40, 217, 0.06)',
+}
+
+function refreshGraphTierColors(cs) {
+  for (const tier of Object.keys(GRAPH_TIER_COLORS)) {
+    const hex = cs.getPropertyValue('--tier-' + tier).trim()
+    const m = /^#([0-9a-f]{6})$/i.exec(hex)
+    if (!m) continue
+    GRAPH_TIER_COLORS[tier] = hex
+    const n = parseInt(m[1], 16)
+    GRAPH_TIER_BG[tier] = `rgba(${n >> 16}, ${(n >> 8) & 255}, ${n & 255}, 0.06)`
+  }
 }
 
 function screenToWorld(sx, sy) {
@@ -7862,6 +7876,7 @@ function renderGraph() {
   ctx.clearRect(0, 0, w, h)
 
   const cs = getComputedStyle(document.documentElement)
+  refreshGraphTierColors(cs)
   const borderColor = cs.getPropertyValue('--border').trim() || '#d1cfc5'
   const textColor = cs.getPropertyValue('--text').trim() || '#141413'
   const textMuted = cs.getPropertyValue('--text-muted').trim() || '#87867f'
@@ -7986,7 +8001,8 @@ function renderGraph() {
     const searchGlow = hasSearch && node.searchMatch
 
     // Opacity
-    let nodeAlpha = 0.85
+    // resting nodes are 3:1 graphics: at 0.85 the dark-theme warm/cold/shared fall to 2.7-2.9 on the card colour, at 1 they hold 3.3+
+    let nodeAlpha = isDark ? 1 : 0.85
     if (searchFaded) nodeAlpha = 0.12
     else if (searchGlow) nodeAlpha = 1
     else if (isHover || isSelected) nodeAlpha = 1
@@ -10557,8 +10573,7 @@ async function loadStatus() {
         }
         const div = document.createElement('div')
         div.className = `status-incident ${inc.status}`
-        // The viewer's local time, like every other time on the dashboard (ISSUE1895 / #1895).
-        const date = new Date(inc.pubDate).toLocaleString('hu-HU')
+        const date = new Date(inc.pubDate).toLocaleString('hu-HU', { timeZone: 'Europe/Budapest' })
         div.innerHTML = `
           <div class="status-incident-header">
             <span class="status-incident-title">${escapeHtml(inc.title)}</span>
@@ -10942,10 +10957,10 @@ document.getElementById('migrateRunBtn').addEventListener('click', async () => {
       <h4>${t('migrate.result.title')}</h4>
       <div class="migrate-result-stats">
         <div class="migrate-result-stat"><div class="migrate-result-stat-value">${data.imported}</div><div class="migrate-result-stat-label">${t('migrate.result.imported')}</div></div>
-        <div class="migrate-result-stat"><div class="migrate-result-stat-value" style="color:#dc3c3c">${data.stats.hot}</div><div class="migrate-result-stat-label">Hot</div></div>
-        <div class="migrate-result-stat"><div class="migrate-result-stat-value" style="color:#d97757">${data.stats.warm}</div><div class="migrate-result-stat-label">Warm</div></div>
-        <div class="migrate-result-stat"><div class="migrate-result-stat-value" style="color:#6a9bcc">${data.stats.cold}</div><div class="migrate-result-stat-label">Cold</div></div>
-        <div class="migrate-result-stat"><div class="migrate-result-stat-value" style="color:#9a8a30">${data.stats.shared}</div><div class="migrate-result-stat-label">Shared</div></div>
+        <div class="migrate-result-stat"><div class="migrate-result-stat-value" style="color:var(--tier-hot)">${data.stats.hot}</div><div class="migrate-result-stat-label">Hot</div></div>
+        <div class="migrate-result-stat"><div class="migrate-result-stat-value" style="color:var(--tier-warm)">${data.stats.warm}</div><div class="migrate-result-stat-label">Warm</div></div>
+        <div class="migrate-result-stat"><div class="migrate-result-stat-value" style="color:var(--tier-cold)">${data.stats.cold}</div><div class="migrate-result-stat-label">Cold</div></div>
+        <div class="migrate-result-stat"><div class="migrate-result-stat-value" style="color:var(--tier-shared)">${data.stats.shared}</div><div class="migrate-result-stat-label">Shared</div></div>
       </div>
       ${data.details ? '<div class="migrate-result-details">' + data.details.map(d => escapeHtml(d)).join('<br>') + '</div>' : ''}
     `
@@ -14828,7 +14843,7 @@ async function loadSettings() {
       const legend = document.createElement('div')
       legend.className = 'autonomy-legend'
       legend.innerHTML = `
-        <div class="autonomy-legend-item"><span class="autonomy-level-dot" style="background:var(--text-muted)"></span><span><strong>1</strong> ${t('autonomy.level.1')}</span></div>
+        <div class="autonomy-legend-item"><span class="autonomy-level-dot" style="background:var(--fill-neutral)"></span><span><strong>1</strong> ${t('autonomy.level.1')}</span></div>
         <div class="autonomy-legend-item"><span class="autonomy-level-dot" style="background:var(--accent)"></span><span><strong>2</strong> ${t('autonomy.level.2')}</span></div>
         <div class="autonomy-legend-item"><span class="autonomy-level-dot" style="background:var(--success)"></span><span><strong>3</strong> ${t('autonomy.level.3')}</span></div>
       `

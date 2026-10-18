@@ -158,6 +158,38 @@ def main():
             pass
         return
 
+    # A pure-acknowledgement inbound ("ok", "118 ok", a thumbs-up) owes no reply
+    # (the same predicate as telegram-reply-guard.py, recorded on the entry by
+    # telegram_progress.py). Enforcing a reply for it produced the exact
+    # failure this hook exists to prevent, one level up: the turn was blocked
+    # for a text answer nobody wanted, and on the second Stop the transcript's
+    # last assistant text -- an internal CLI summary -- was sent to the chat.
+    # So: remove the placeholder quietly and carry on with whatever is left.
+    # An entry WITHOUT the key is not an ack (old enforcement), and a question
+    # or a decision ("91 igen", "115 mehet") keeps the mandatory reply.
+    acks = [p for p in pend if p.get("ack") is True]
+    if acks:
+        tok_ack = token(sd)
+        for p in acks:
+            if tok_ack:
+                try:
+                    api(tok_ack, "deleteMessage", {"chat_id": p["chat_id"], "message_id": p["message_id"]})
+                except Exception as e:
+                    log(sd, f"[stop] ack placeholder delete failed: {type(e).__name__}")
+        pend = [p for p in pend if p.get("ack") is not True]
+        log(sd, f"[stop] {len(acks)} ack-type placeholder(s) removed without enforcement sid={sid}")
+        if not pend:
+            for f in (path, guard):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+            return
+        try:
+            json.dump(pend, open(path, "w"))
+        except Exception:
+            pass
+
     # A Telegram turn whose reply was NOT sent for the listed chat(s).
     blocked_before = os.path.exists(guard)
     if not stop_active and not blocked_before:

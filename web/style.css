@@ -8,11 +8,13 @@
   --bg-code: #f0eee6;
   --text: #141413;
   --text-secondary: #30302e;
-  --text-muted: #87867f;
-  /* Dimmed body text that still has to be READ, not just noticed: transcript
-     metadata, notes, action lines. Distinct from --text-muted, which sits at
-     3.5:1 on this background and is fine for a label next to something else,
-     but not for a line someone has to follow. Measured 5.4:1 here. GH #426. */
+  /* Alias of --text-dim since the colour-contrast round (cards 8dc1d1a8, 4e238e1c): the
+     old #87867f was 3.15:1 on --bg-input, below the 4.5 a 11-13px label needs. The
+     name stays so the ~225 references keep working. Where --text-muted was used as a
+     BACKGROUND under white text, use --fill-neutral instead. */
+  --text-muted: var(--text-dim);
+  /* Dimmed body text that still has to be READ, not just noticed. 4.89:1 on the
+     worst surface (--bg-input). GH #426. */
   --text-dim: #68675f;
   --border: #d1cfc5;
   --border-focus: #d97757;
@@ -26,6 +28,27 @@
   --success-soft: rgba(120, 140, 93, 0.12);
   --info: #6a9bcc;
   --info-soft: rgba(106, 155, 204, 0.12);
+  /* Fills under WHITE text (>= 4.8:1 on white; the plain role colours give 2.9-3.7).
+     Use these where a role colour is a background and the text on it is 8-13px.
+     Dots and bars WITHOUT text keep the plain role colour (3.0 is the bar there). */
+  --fill-accent: #bf4f2b;
+  --fill-accent-hover: #a3401d;
+  --fill-success: #66784f;
+  --fill-success-hover: #566741;
+  --fill-info: #3c75af;
+  --fill-neutral: #68675f;
+  /* Role-colour TEXT on the role's own 12% tint (badges): >= 4.5:1 on every surface. */
+  --success-text: #5a6946;
+  --accent-text: #a94626;
+  --info-text: #35689b;
+  --danger-text: #a64139;
+  --badge-heartbeat: #c85078;
+  --badge-heartbeat-text: #ad365e;
+  /* Memory tier palette: white 11px text on these is >= 4.5:1. */
+  --tier-hot: #e32650;
+  --tier-warm: #b45309;
+  --tier-cold: #1a6df4;
+  --tier-shared: #6d28d9;
   --shadow-sm: 0 1px 3px rgba(20, 20, 19, 0.04);
   --shadow-md: 0 4px 16px rgba(20, 20, 19, 0.06);
   --shadow-lg: 0 8px 32px rgba(20, 20, 19, 0.1);
@@ -36,6 +59,8 @@
 }
 
 [data-theme="dark"] {
+  /* shared tier: lighter purple, the dark card stripe needs >= 3.0 and the white badge text >= 4.5 */
+  --tier-shared: #b23fcf;
   --bg: #141413;
   --bg-card: #1f1e1d;
   --bg-card-hover: #262624;
@@ -44,8 +69,14 @@
   --bg-code: #262624;
   --text: #faf9f5;
   --text-secondary: #b0aea5;
-  --text-muted: #73726c;
-  --text-dim: #9a9890;   /* 6.4:1 on --bg. See the light-theme note. */
+  --text-muted: var(--text-dim);
+  --text-dim: #9a9890;   /* 6.4:1 on --bg, 4.58 on --bg-input. */
+  --fill-neutral: #73726c;   /* white 4.82; the light value #68675f would be 2.93 on a dark card */
+  --success-text: #97aa7f;
+  --accent-text: #e09177;
+  --info-text: #80aad3;
+  --danger-text: #d58b84;
+  --badge-heartbeat-text: #da88a3;
   --border: #3d3d3a;
   --shadow-sm: 0 1px 3px rgba(0,0,0,0.2);
   --shadow-md: 0 4px 16px rgba(0,0,0,0.25);
@@ -355,7 +386,7 @@ nav { display: flex; gap: 4px; }
   padding: 0 6px;
   margin-left: 6px;
   border-radius: 999px;
-  background: #e53e3e;
+  background: var(--danger);
   color: #fff;
   font-size: 11px;
   font-weight: 700;
@@ -672,7 +703,7 @@ main {
 .quota-bar-fill.warn { background: var(--accent); }
 .quota-bar-fill.danger { background: var(--danger); }
 /* Stale or rolled over: the numbers stay visible but must not read as current. */
-.quota-bar.muted .quota-bar-fill { background: var(--text-muted); }
+.quota-bar.muted .quota-bar-fill { background: var(--fill-neutral); }
 .quota-bar.muted .quota-bar-value { color: var(--text-muted); }
 .quota-bar-value { font-size: 12px; color: var(--text); font-variant-numeric: tabular-nums; }
 .quota-bar-reset { color: var(--text-muted); }
@@ -1139,10 +1170,10 @@ main {
   color: white;
   flex-shrink: 0;
 }
-.assignee-dot.owner { background: var(--accent); }
-.assignee-dot.bot { background: var(--info); }
-.assignee-dot.agent { background: var(--success); }
-.assignee-dot.unknown { background: var(--text-muted); }
+.assignee-dot.owner { background: var(--fill-accent); }
+.assignee-dot.bot { background: var(--fill-info); }
+.assignee-dot.agent { background: var(--fill-success); }
+.assignee-dot.unknown { background: var(--fill-neutral); }
 
 .kanban-card-due {
   font-size: 10px;
@@ -1313,6 +1344,11 @@ main {
 /* Low also steps back in contrast, not just in hue: a background tint alone is
    too weak to read as "background work" on a dense board. */
 .kanban-card[data-priority="low"] .kanban-card-title { color: var(--text-dim); }
+/* Meta lines (assignee, due, +N labels) on the TINTED cards (urgent/high) read --text-muted,
+   which is --text-dim now: 4.31 / 4.12 (urgent) and 3.72 (high, dark) -- under 4.5. The
+   tint is layered over --bg-card, so raise the meta text one step on those two only. */
+.kanban-card[data-priority="urgent"],
+.kanban-card[data-priority="high"] { --text-muted: var(--text-secondary); }
 
 /* Dark theme needs both a stronger tint and the opposite direction for `low`:
    the same alpha that reads on a white card is invisible on a dark one, and a
@@ -1387,14 +1423,14 @@ main {
   color: #fff;
   flex-shrink: 0;
 }
-.kanban-swimlane-avatar.owner { background: var(--accent); }
-.kanban-swimlane-avatar.bot { background: var(--info); }
-.kanban-swimlane-avatar.agent { background: var(--success); }
-.kanban-swimlane-avatar.unknown { background: var(--text-muted); }
+.kanban-swimlane-avatar.owner { background: var(--fill-accent); }
+.kanban-swimlane-avatar.bot { background: var(--fill-info); }
+.kanban-swimlane-avatar.agent { background: var(--fill-success); }
+.kanban-swimlane-avatar.unknown { background: var(--fill-neutral); }
 .kanban-swimlane-avatar.priority-urgent { background: var(--danger); }
-.kanban-swimlane-avatar.priority-high { background: var(--accent); }
-.kanban-swimlane-avatar.priority-normal { background: var(--text-muted); }
-.kanban-swimlane-avatar.priority-low { background: var(--border); }
+.kanban-swimlane-avatar.priority-high { background: var(--fill-accent); }
+.kanban-swimlane-avatar.priority-normal { background: var(--fill-neutral); }
+.kanban-swimlane-avatar.priority-low { background: var(--border); color: var(--text); }
 .kanban-swimlane-name {
   font-weight: 600;
   font-size: 14px;
@@ -1890,7 +1926,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   border-radius: 50%;
 }
 .tg-dot.connected { background: var(--success); }
-.tg-dot.disconnected { background: var(--text-muted); }
+.tg-dot.disconnected { background: var(--fill-neutral); }
 
 /* === Process status === */
 .process-indicator {
@@ -1911,7 +1947,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   box-shadow: 0 0 6px rgba(120, 140, 93, 0.6);
   animation: pulse-dot 2s ease-in-out infinite;
 }
-.process-dot.stopped { background: var(--text-muted); }
+.process-dot.stopped { background: var(--fill-neutral); }
 .process-dot.restarting {
   background: var(--warning, #d4a52c);
   box-shadow: 0 0 6px rgba(212, 165, 44, 0.6);
@@ -2540,7 +2576,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   height: 28px;
   border-radius: 50%;
   border: 2px solid var(--bg-modal);
-  background: var(--accent);
+  background: var(--fill-accent);
   color: white;
   display: flex;
   align-items: center;
@@ -2548,7 +2584,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   cursor: pointer;
   transition: all var(--transition);
 }
-.avatar-change-btn:hover { background: var(--accent-hover); }
+.avatar-change-btn:hover { background: var(--fill-accent-hover); }
 
 .detail-avatar-gallery {
   margin-bottom: 16px;
@@ -2730,7 +2766,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 .btn-danger {
   padding: 10px 20px;
   background: transparent;
-  color: var(--danger);
+  color: var(--danger-text);
   border: 1px solid var(--danger);
   border-radius: var(--radius-sm);
   font-size: 14px;
@@ -2885,15 +2921,15 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 }
 .badge-active {
   background: var(--success-soft);
-  color: var(--success);
+  color: var(--success-text);
 }
 .badge-paused {
   background: rgba(217, 119, 87, 0.12);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 .badge-heartbeat {
-  background: rgba(200, 80, 120, 0.12);
-  color: #c85078;
+  background: color-mix(in srgb, var(--badge-heartbeat) 12%, transparent);
+  color: var(--badge-heartbeat-text);
 }
 
 .task-info {
@@ -3088,7 +3124,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   margin-left: 6px;
   border-radius: 999px;
   background: var(--warning, #d4a52c);
-  color: #fff;
+  color: #141413;
   font-size: 11px;
   font-weight: 700;
   line-height: 18px;
@@ -3395,10 +3431,12 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 }
 
 /* === Tier Badges === */
-.badge-hot { background: rgba(220, 60, 60, 0.12); color: #dc3c3c; }
-.badge-warm { background: rgba(217, 119, 87, 0.12); color: var(--accent); }
-.badge-cold { background: var(--info-soft); color: var(--info); }
-.badge-shared { background: rgba(200, 180, 100, 0.18); color: #9a8a30; }
+/* Same per-theme --tier-* fills as the recall view (.recall-badge-cat), white text:
+   4.51 / 5.02 / 4.63 and 7.10 (light), 4.51 / 5.02 / 4.63 and 4.66 (dark). */
+.badge-hot    { background: var(--tier-hot);    color: #fff; }
+.badge-warm   { background: var(--tier-warm);   color: #fff; }
+.badge-cold   { background: var(--tier-cold);   color: #fff; }
+.badge-shared { background: var(--tier-shared); color: #fff; }
 
 .mem-agent-badge {
   font-size: 10px;
@@ -3801,8 +3839,8 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 }
 .expand-option:hover { border-color: var(--accent); color: var(--accent); }
 .expand-option.selected {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--fill-accent);
+  border-color: var(--fill-accent);
   color: white;
 }
 .expand-apply-row {
@@ -4267,10 +4305,10 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 .recall-memory {
   border-left: 3px solid var(--border);
 }
-.recall-memory[data-cat="hot"]    { border-left-color: #ef4444; }
-.recall-memory[data-cat="warm"]   { border-left-color: #f59e0b; }
-.recall-memory[data-cat="cold"]   { border-left-color: #3b82f6; }
-.recall-memory[data-cat="shared"] { border-left-color: #8b5cf6; }
+.recall-memory[data-cat="hot"]    { border-left-color: var(--tier-hot); }
+.recall-memory[data-cat="warm"]   { border-left-color: var(--tier-warm); }
+.recall-memory[data-cat="cold"]   { border-left-color: var(--tier-cold); }
+.recall-memory[data-cat="shared"] { border-left-color: var(--tier-shared); }
 .recall-item-header {
   display: flex;
   justify-content: space-between;
@@ -4291,12 +4329,12 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   border-radius: 12px;
   white-space: nowrap;
 }
-.recall-badge-agent { background: var(--accent); }
-.recall-badge-cat { background: var(--text-muted); }
-.recall-badge-cat[data-cat="hot"]    { background: #ef4444; }
-.recall-badge-cat[data-cat="warm"]   { background: #f59e0b; }
-.recall-badge-cat[data-cat="cold"]   { background: #3b82f6; }
-.recall-badge-cat[data-cat="shared"] { background: #8b5cf6; }
+.recall-badge-agent { background: var(--fill-accent); }
+.recall-badge-cat { background: var(--fill-neutral); }
+.recall-badge-cat[data-cat="hot"]    { background: var(--tier-hot); }
+.recall-badge-cat[data-cat="warm"]   { background: var(--tier-warm); }
+.recall-badge-cat[data-cat="cold"]   { background: var(--tier-cold); }
+.recall-badge-cat[data-cat="shared"] { background: var(--tier-shared); }
 .recall-item-content {
   white-space: pre-wrap;
   font-size: 13px;
@@ -4628,7 +4666,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   font-weight: 500;
   padding: 1px 6px;
   border-radius: 8px;
-  background: var(--accent);
+  background: var(--fill-accent);
   color: white;
   vertical-align: middle;
   margin-left: 6px;
@@ -5185,7 +5223,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 .connector-status-dot.configured { background: var(--info); }
 .connector-status-dot.needs_auth { background: var(--accent); }
 .connector-status-dot.failed { background: var(--danger); }
-.connector-status-dot.unknown { background: var(--text-muted); }
+.connector-status-dot.unknown { background: var(--fill-neutral); }
 
 .connector-info {
   flex: 1;
@@ -5370,8 +5408,8 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   color: var(--text);
 }
 .catalog-filter-btn.active {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--fill-accent);
+  border-color: var(--fill-accent);
   color: #fff;
 }
 
@@ -5480,11 +5518,11 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   gap: 6px;
 }
 .catalog-install-btn.install {
-  background: var(--success);
+  background: var(--fill-success);
   color: #fff;
 }
 .catalog-install-btn.install:hover {
-  filter: brightness(1.1);
+  background: var(--fill-success-hover);
 }
 .catalog-install-btn.installed {
   background: var(--success-soft);
@@ -5748,7 +5786,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 }
 .migrate-result-stat-value {
   font-size: 20px;
-  font-weight: 600;
+  font-weight: 700;   /* 20px/700 is large text (>= 14pt bold): the tier colours need 3.0, not 4.5, on the dark card */
 }
 .migrate-result-stat-label {
   font-size: 11px;
@@ -5826,8 +5864,8 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 }
 
 .skills-filter-btn.active {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--fill-accent);
+  border-color: var(--fill-accent);
   color: #fff;
 }
 
@@ -6271,6 +6309,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   .mem-stats { gap: 8px; }
   .stat-card { min-width: 70px; padding: 12px; }
   .stat-value { font-size: 20px; }
+  .mem-stats .stat-value { font-weight: 700; }   /* 20px needs bold to count as large text (tier colours, dark: 3.31-3.69) */
   .mem-tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .mem-tab { padding: 10px 12px; font-size: 12px; }
   .log-date-nav { gap: 8px; }
@@ -6384,6 +6423,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   border-radius: 6px;
   padding: 3px;
 }
+[data-theme="dark"] .autonomy-levels { background: var(--bg-card-hover); }
 .autonomy-level-btn {
   padding: 6px 16px;
   border: none;
@@ -6410,13 +6450,13 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   box-shadow: var(--shadow-sm);
 }
 .autonomy-level-btn.active[data-level="1"] {
-  background: var(--text-muted);
+  background: var(--fill-neutral);
 }
 .autonomy-level-btn.active[data-level="2"] {
-  background: var(--accent);
+  background: var(--fill-accent);
 }
 .autonomy-level-btn.active[data-level="3"] {
-  background: var(--success);
+  background: var(--fill-success);
 }
 .autonomy-grid > :last-child { margin-bottom: 0; }
 .autonomy-footer {
@@ -6671,7 +6711,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   align-items: center;
   padding: 7px 14px;
   border-radius: var(--radius-sm);
-  background: #00977c;
+  background: #007d67;
   color: #fff;
   font-size: 12px;
   font-weight: 600;
@@ -6680,7 +6720,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   transition: background var(--transition), transform var(--transition);
 }
 .cxhu-banner-cta:hover {
-  background: #007d67;
+  background: #006a57;
   transform: translateY(-1px);
 }
 .cxhu-banner-close {
@@ -6833,7 +6873,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   transition: color var(--transition), background var(--transition);
 }
 .auth-mode-card.selected .auth-mode-card-icon {
-  background: var(--accent);
+  background: var(--fill-accent);
   color: #fff;
 }
 .auth-mode-card-body { flex: 1; min-width: 0; }
@@ -7042,7 +7082,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 .chat-bubble-avatar { flex-shrink: 0; }
 .chat-bubble { max-width: 72%; display: flex; flex-direction: column; gap: 4px; }
 .bubble-out {
-  background: var(--accent);
+  background: var(--fill-accent);
   color: #fff;
   border-radius: 16px 4px 16px 16px;
   padding: 10px 14px;
@@ -7147,8 +7187,8 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   margin: 8px 0 0;
 }
 .agent-sharedenv-text { font-size: 11px; color: var(--warning, #d4a52c); font-weight: 600; overflow-wrap: anywhere; }
-.btn-danger {
-  background: #ef4444;
+.agent-reauth-banner .btn-danger {
+  background: var(--danger);
   color: #fff;
   border: none;
   border-radius: 6px;
@@ -7158,8 +7198,8 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   cursor: pointer;
   flex-shrink: 0;
 }
-.btn-danger:hover { background: #dc2626; }
-.btn-danger:disabled { opacity: 0.6; cursor: not-allowed; }
+.agent-reauth-banner .btn-danger:hover { background: var(--danger-hover); }
+.agent-reauth-banner .btn-danger:disabled { opacity: 0.6; cursor: not-allowed; }
 .agent-card-actions {
   display: flex;
   gap: 6px;
@@ -7370,7 +7410,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 .naplo-toolbar { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
 .naplo-source-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
 .naplo-tab { padding: 5px 14px; border-radius: 20px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text); cursor: pointer; font-size: 13px; transition: background 0.15s, color 0.15s; }
-.naplo-tab.active { background: var(--accent, #2563eb); color: #fff; border-color: transparent; }
+.naplo-tab.active { background: var(--fill-accent, #2563eb); color: #fff; border-color: transparent; }
 .naplo-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .naplo-date { padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-card); color: var(--text); font-size: 13px; }
 .naplo-date-sep { color: var(--text-muted); font-size: 13px; }
@@ -7644,7 +7684,7 @@ body {
 .onboarding-step.active { color: var(--text); border-color: var(--accent); }
 .onboarding-step.done { opacity: 0.55; }
 .onboarding-step .onb-num { display: inline-flex; width: 18px; height: 18px; align-items: center; justify-content: center; border-radius: 50%; background: var(--border); font-size: 11px; }
-.onboarding-step.active .onb-num { background: var(--accent); color: #fff; }
+.onboarding-step.active .onb-num { background: var(--fill-accent); color: #fff; }
 .onboarding-body p { font-size: 14px; line-height: 1.6; }
 .onb-input { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-input); color: var(--text); font-size: 13px; margin: 4px 0; }
 .onb-hint { font-size: 12px; color: var(--text-muted); margin: 4px 0 12px; }
@@ -7730,13 +7770,13 @@ body {
   padding: 11px;
   border: 0;
   border-radius: 8px;
-  background: var(--accent);
+  background: var(--fill-accent);
   color: #fff;
   font-size: 15px;
   font-weight: 600;
   cursor: pointer;
 }
-.mv-auth-card button:hover { background: var(--accent-hover); }
+.mv-auth-card button:hover { background: var(--fill-accent-hover); }
 .mv-auth-card button:disabled { opacity: 0.6; cursor: default; }
 .mv-auth-err {
   color: var(--danger);

@@ -21,6 +21,7 @@ import {
   stampCustomApiKeyApproval,
 } from './agent-process.js'
 import { withSessionSendLock } from './session-send-lock.js'
+import { mergeDenyRules, workerDenyRules, injectBashEgressParser } from './agent-scaffold.js'
 import { readClaudeCodeOauthJson } from './claude-credentials.js'
 import { detectPaneState } from '../pane-state.js'
 import { notifyChannel } from '../notify.js'
@@ -479,7 +480,16 @@ export function ensureWorkerCwd(ctx: WorkerCtx = ctxSlow): void {
   // skipDangerousModePermissionPrompt: suppress the "Bypass Permissions mode"
   // first-run warning so the headless worker (launched with
   // --dangerously-skip-permissions) reaches its prompt without a blocking modal.
-  writeFileSync(settingsPath, JSON.stringify({ ...current, enabledPlugins, skipDangerousModePermissionPrompt: true }, null, 2) + '\n')
+  const next: WorkerSettings = { ...current, enabledPlugins, skipDangerousModePermissionPrompt: true }
+  // The worker runs --dangerously-skip-permissions on a prompt taken from a
+  // message, in a config dir no profile or repo settings file reaches: without
+  // this it carries ZERO deny rules (WORKERVAK925, measured 2026-10-02). Merged,
+  // not replaced, so a rule an operator added by hand survives the next start.
+  mergeDenyRules(next, workerDenyRules(homedir()))
+  // And the parser hook every sub-agent already carries (it reads a command's SHAPE, which a deny
+  // pattern cannot: an inserted flag, an absolute path). Idempotent; other hooks are kept.
+  injectBashEgressParser(next as Record<string, unknown>)
+  writeFileSync(settingsPath, JSON.stringify(next, null, 2) + '\n')
 
   // Subscription auth: materialise the host login JSON as .credentials.json AND
   // clear the stale path-hashed Keychain entry that would shadow it (see the

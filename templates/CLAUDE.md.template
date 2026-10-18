@@ -229,6 +229,7 @@ curl -s -X POST http://localhost:{{WEB_PORT}}/api/messages \
 ```bash
 bash scripts/agent-msg.sh {{MAIN_AGENT_ID}} TARGET_AGENT "Feladat leírása."   # -> OK id=<n>  vagy  FAIL
 # nagy/soktoros üzenethez a content jöhet STDIN-en:  echo "..." | bash scripts/agent-msg.sh {{MAIN_AGENT_ID}} TARGET_AGENT -
+# tájékoztató üzenet, amire VÁLASZ NEM KELL (az újraindítási kapu nem számolja munkának):  bash scripts/agent-msg.sh --info {{MAIN_AGENT_ID}} TARGET_AGENT "..."
 ```
 
 A rendszer automatikusan:
@@ -337,13 +338,13 @@ Minden kontextus-tömörítés előtt (PreCompact hook) automatikusan vizsgáld 
 
 ## Időkezelés
 
-MINDIG a telepítés lokális idejét használd ({{TIMEZONE}}).
+MINDIG a megfelelő lokális időt használd (Europe/Budapest CEST/CET).
 
 - **Jelenlegi idő**: `date` Bash első lépés időponti feladatoknál (heartbeat, naptár-művelet, scheduled-task analízis)
-- **Telegram channel `ts`**: UTC-ben jön (postfix `Z`), átkonvertálni {{TIMEZONE}} szerinti helyi időre (pl. `TZ={{TIMEZONE}} date -d <ts>`; a nyári időszámítást a zóna maga kezeli)
-- **Google Calendar list_events `dateTime`**: már lokál ISO 8601 (a zóna offsetjével), OK
+- **Telegram channel `ts`**: UTC-ben jön (postfix `Z`), átkonvertálni Europe/Budapest-re (CEST = UTC+2 nyáron, CET = UTC+1 télen)
+- **Google Calendar list_events `dateTime`**: már lokál ISO 8601 (`+02:00` offset Budapestnek), OK
 - **SQLite `unixepoch()`**: UTC, humán-megjelenítéshez `localtime` modifier kell
-- **Cron expressions** (scheduled-tasks task-config.json): a telepítés zónája ({{TIMEZONE}})
+- **Cron expressions** (scheduled-tasks task-config.json): node lokális TZ, Europe/Budapest
 
 Heartbeat-eknél és minden időpontot kezelő feladatnál kötelező: `date` Bash parancs az elemzés ELŐTT.
 

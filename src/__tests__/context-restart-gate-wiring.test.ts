@@ -201,10 +201,55 @@ describe('restart gate wiring: the persistent-block alert', () => {
 
   // KILLS: dropping the >= 120 minute wording escalation. The test file header
   // claimed this was covered; it was not, on any of the five tests there.
+  //
+  // RIASZTALLIT924 (card cdcedd77): this test used to pin the phrase 'NEM fog megszunni', i.e. the claim that
+  // the SAME REASON had lasted N minutes and would not clear by itself. That claim was false (the clock measures
+  // the context staying above the threshold, the reason string changes underneath), so the assertion pinned a
+  // wrong statement. It is replaced by a stricter one: past 120 minutes the alert must carry the escalation
+  // AND must not carry the false claim; before 120 it carries neither.
   it('escalates its WORDING past 120 minutes, and not before', async () => {
     const early = await alertRowsAfter(30)
-    expect(early.some((r) => r.includes('NEM fog megszunni'))).toBe(false)
+    expect(early.some((r) => r.includes('FIGYELEM: a kontextus'))).toBe(false)
     const late = await alertRowsAfter(130)
-    expect(late.some((r) => r.includes('NEM fog megszunni'))).toBe(true)
+    expect(late.some((r) => r.includes('FIGYELEM: a kontextus 130 perce folyamatosan a kuszob folott all'))).toBe(true)
+    // the false claims are gone for good
+    for (const r of late) {
+      expect(r).not.toContain('NEM fog megszunni')
+      expect(r).not.toContain('ugyanez az ok')
+    }
+  })
+
+  it('a sweep that cannot read the context size keeps the clock and counts itself as unmeasured; a measured one does not', async () => {
+    const now = Date.now()
+    const { checkAgent } = await import('../web/context-restart-gate-runner.js')
+    // no transcript for this agent: the reading is null, the gate blocks fail-closed, the clock runs through
+    runState = { firstBlockedAt: now - 10 * 60_000, lastAlertAt: null, unmeasuredTicks: 2 }
+    await checkAgent('gatewire-no-transcript', now)
+    expect(runState.firstBlockedAt).toBe(now - 10 * 60_000)
+    expect(runState.unmeasuredTicks).toBe(3)
+    // NEGATIVE CONTROL: the agent WITH a transcript above the threshold is measured, so the count stays
+    runState = { firstBlockedAt: now - 10 * 60_000, lastAlertAt: null, unmeasuredTicks: 2 }
+    const { createAgentMessage } = await import('../db.js')
+    createAgentMessage(ALERT_AGENT, 'gatewire-other', 'Most rajtad a sor (count).')
+    await checkAgent(ALERT_AGENT, now)
+    expect(runState.unmeasuredTicks ?? 2).toBe(2)
+  })
+
+  it('past 120 minutes it says how many sweeps of the streak could not be measured, and only when there were some', async () => {
+    const now = Date.now()
+    const { createAgentMessage, getDb } = await import('../db.js')
+    const { checkAgent } = await import('../web/context-restart-gate-runner.js')
+    const rows = async (unmeasuredTicks: number) => {
+      getDb().prepare("DELETE FROM agent_messages WHERE content LIKE '%CONTEXT-RESTART-GATE-RIASZTAS%'").run()
+      runState = { firstBlockedAt: now - 130 * 60_000, lastAlertAt: null, unmeasuredTicks }
+      createAgentMessage(ALERT_AGENT, 'gatewire-other', `Most rajtad a sor (${unmeasuredTicks}).`)
+      await checkAgent(ALERT_AGENT, now)
+      return (getDb().prepare("SELECT content FROM agent_messages WHERE content LIKE '%CONTEXT-RESTART-GATE-RIASZTAS%'").all() as Array<{ content: string }>).map((r) => r.content)
+    }
+    const withTicks = await rows(7)
+    expect(withTicks.some((c) => c.includes('130 percbol 7 ellenorzesnel nem volt kontextus-meres'))).toBe(true)
+    const without = await rows(0)
+    expect(without.length).toBeGreaterThan(0)
+    expect(without.some((c) => c.includes('nem volt kontextus-meres'))).toBe(false)
   })
 })

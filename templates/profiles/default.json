@@ -3,6 +3,7 @@
   "label": "Alap\u00e9rtelmezett (kompatibilit\u00e1si)",
   "description": "R\u00e9gi, skip-permission m\u00f3d\u00fa \u00e1gensekhez. \u00daj \u00e1genshez ink\u00e1bb v\u00e1lassz szerep-specifikus profilt.",
   "permissionMode": "permissive",
+  "destructiveGate": true,
   "filesystem": {
     "allow": [],
     "deny": [

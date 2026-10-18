@@ -42,7 +42,12 @@ describe('evidence-rule scaffold block', () => {
   it('ensureEvidenceSection is exported and writes atomically', () => {
     expect(SCAFFOLD).toContain('export function ensureEvidenceSection(')
     const fn = SCAFFOLD.slice(SCAFFOLD.indexOf('export function ensureEvidenceSection('))
-    expect(fn.slice(0, 1200)).toContain('atomicWriteFileSync')
+    // Card dc598b53: the rewrite goes through the one door that keeps a copy of the old text first
+    // (persona-backup.ts), and that door is where the atomic write lives. Both halves are pinned, so the test is
+    // not weaker than it was: the function must call the door, and the door must write atomically.
+    expect(fn.slice(0, 1200)).toContain('writeClaudeMdKeepingBackup(claudeMdPath, updated)')
+    const door = readFileSync(join(__dirname, '..', 'web', 'persona-backup.ts'), 'utf-8')
+    expect(door).toMatch(/export function writeClaudeMdKeepingBackup[\s\S]*atomicWriteFileSync\(claudeMdPath, updated\)/)
   })
 
   it('resolves the main agent CLAUDE.md at PROJECT_ROOT, sub-agents under agentDir', () => {

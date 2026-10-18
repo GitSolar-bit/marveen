@@ -262,7 +262,9 @@ def main():
         ("last line wins (on)", "PERSONA_GUARD_NOTIFY=0\nPERSONA_GUARD_NOTIFY=1\n", True),
         ("last line wins (off)", "PERSONA_GUARD_NOTIFY=1\nPERSONA_GUARD_NOTIFY=0\n", False),
         ("commented out", "# PERSONA_GUARD_NOTIFY=1\n", False),
-        ("inline comment is part of the value", "PERSONA_GUARD_NOTIFY=1 # on\n", False),
+        # card 6600f89b: a ` #` outside quotes starts a trailing comment (docs/env-comment-grammar.md), so this reads as `1`
+        ("trailing comment after a space is cut", "PERSONA_GUARD_NOTIFY=1 # on\n", True),
+        ("a ` #` inside quotes is part of the value", "PERSONA_GUARD_NOTIFY=\"1 # on\"\n", False),
         ("export prefix is a different key", "export PERSONA_GUARD_NOTIFY=1\n", False),
         ("mismatched quotes", "PERSONA_GUARD_NOTIFY=\"1'\n", False),
     ):

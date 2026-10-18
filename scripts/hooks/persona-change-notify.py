@@ -99,12 +99,31 @@ _JS_WS = " \t\n\v\f\r\u00a0\u1680\u2028\u2029\u202f\u205f\u3000\ufeff" + "".join
     chr(c) for c in range(0x2000, 0x200B))
 
 
+def _strip_trailing_comment(raw):
+    """Cut a trailing ` #` comment outside quotes, the SAME rule as stripTrailingComment in
+    src/env-parse.ts (card 6600f89b): a `#` with a space or tab before it starts a comment. A quote
+    that closes ends the quoted part, so a `#` after it is a comment and a `#` inside it is not; a
+    quote that never closes switches the rule off for the rest of the value."""
+    q = None
+    for i, c in enumerate(raw):
+        if q:
+            if c == q:
+                q = None
+            continue
+        if c in ("'", '"'):
+            q = c
+            continue
+        if c == "#" and i > 0 and raw[i - 1] in (" ", "\t"):
+            return raw[:i]
+    return raw
+
+
 def _env_file_value(path, key):
     """Value of `key` in an install .env, by the SAME grammar as src/env-parse.ts
     (parseEnvContent): blank and `#` lines skipped, the line, key and value
-    trimmed, ONE pair of matching surrounding quotes stripped, the last line
-    wins. There is no `export` prefix and no inline comment there either, so
-    neither is understood here: one rule for the product and for this hook, or
+    trimmed, a trailing ` #` comment outside quotes cut, ONE pair of matching
+    surrounding quotes stripped, the last line wins. There is no `export`
+    prefix there either, so it is not understood here: one rule for the product and for this hook, or
     an owner who writes "1" gets no alert and no warning (Sam's review of
     #1546). src/__tests__/persona-guard-env-parity.test.ts pins the two together.
     """
@@ -122,7 +141,7 @@ def _env_file_value(path, key):
         if not t or t.startswith("#") or "=" not in t:
             continue
         k, v = t.split("=", 1)
-        k, v = k.strip(_JS_WS), v.strip(_JS_WS)
+        k, v = k.strip(_JS_WS), _strip_trailing_comment(v).strip(_JS_WS)
         if v and v[0] in ("'", '"') and v[0] == v[-1]:
             v = v[1:-1]
         if k == key:

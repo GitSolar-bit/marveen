@@ -42,7 +42,10 @@ if [ -z "$NODE_BIN" ]; then
   done
 fi
 if [ -n "$NODE_BIN" ]; then
-  GH_TOKEN="$(printf 'GH_TOKEN=github-fleet-token\n' | "$NODE_BIN" "$INSTALL_DIR/scripts/vault-resolve.mjs" 2>/dev/null | cut -d= -f2- || true)"
+  # PR_MONITOR_VAULT_KEY names the vault entry. The monitor only READS public PRs,
+  # so point it at a scope-less token instead of a fleet token that can push.
+  PR_MONITOR_VAULT_KEY="${PR_MONITOR_VAULT_KEY:-github-fleet-token}"
+  GH_TOKEN="$(printf 'GH_TOKEN=%s\n' "$PR_MONITOR_VAULT_KEY" | "$NODE_BIN" "$INSTALL_DIR/scripts/vault-resolve.mjs" 2>/dev/null | cut -d= -f2- || true)"
 fi
 # Legacy fallback: the plaintext file, if the vault could not resolve (e.g. dist
 # not built or node missing). Safe to keep even after the loose file is removed.

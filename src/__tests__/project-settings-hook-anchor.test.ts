@@ -60,6 +60,12 @@ const EXPECTED: Record<string, string[]> = {
     'outgoing-copy-gate.py', 'email-approval-gate.py',
     'channel-image-resize.sh', 'egress-gate.mjs', 'memory-frontmatter-gate.py',
     'memory-frontmatter-bash-gate.py',
+    // GITFORCEMAIN1003: the force-push half of the Bash parser, `--git-only`. The egress half is NOT
+    // wired for the main agent (its own API calls would be cut), and the test below pins that.
+    'bash-egress-parser.mjs',
+    // Card 572dbd49: the warn-only watcher on the channel reply for the daily item numbering.
+    // Wired in THIS install's settings (main agent only, deliberately not seeded).
+    'napi-szamozas-reply-watch.py',
   ],
   Stop: ['marveen-commands.py', 'telegram-reply-guard.py', 'telegram_progress_clear.py', 'slack_progress_clear.py'],
   StopFailure: ['ledger-turn-failure.py'],
@@ -111,5 +117,14 @@ describe('tracked .claude/settings.json hook anchor (#1305)', () => {
     // No node -> BLOCK (exit 2), never fail-open silence.
     expect(cmd).toMatch(/command -v node[^;]*\|\|\s*\{[^}]*exit 2/)
     expect(cmd).toContain('egress-gate.mjs')
+  })
+
+  it('the Bash parser runs with --git-only and fails closed without node (GITFORCEMAIN1003)', () => {
+    const entries = (hooks.PreToolUse ?? []).filter((e) => JSON.stringify(e).includes('bash-egress-parser.mjs'))
+    expect(entries).toHaveLength(1)
+    expect(entries[0].matcher).toBe('Bash')
+    const cmd = entries[0].hooks?.[0]?.command ?? ''
+    expect(cmd).toMatch(/command -v node[^;]*\|\|\s*\{[^}]*exit 2/)
+    expect(cmd).toMatch(/bash-egress-parser\.mjs"? --git-only$/)
   })
 })

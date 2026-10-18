@@ -288,10 +288,6 @@ export function initDatabase(dbPathOverride?: string): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_convlog_agent ON conversation_log(agent_id, created_at)`)
-  // Pure-created_at index for the daily retention prune -- idx_convlog_agent is
-  // (agent_id, created_at), so its leading column makes it useless for an
-  // agent-agnostic `WHERE created_at < ?` sweep.
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_convlog_created ON conversation_log(created_at)`)
   // Migration for pre-existing DBs: transcript-less voice/video_note inbounds
   // keep their attachment identity so a respawned session can still download
   // and transcribe them; reply_to_message_id lets an inbound quote be
@@ -574,6 +570,24 @@ export function initDatabase(dbPathOverride?: string): void {
     BEGIN
       INSERT INTO homoglyph_findings (src_table, src_id, sample, found_at)
       VALUES ('kanban_cards', NEW.id, substr(NEW.title, 1, 120), CAST(strftime('%s','now') AS INTEGER));
+    END
+  `)
+
+  // HOMOPATCH926 (card 57a4249f): the memory EDIT path was in neither net. The API warned on POST only,
+  // and these triggers sat on the kanban tables only, so a PATCH that put a Cyrillic look-alike into a
+  // memory left no trace anywhere (measured by HEX on its own PATCH, 2026-09-26) -- and the documented
+  // way to FIX a flagged memory is exactly a PATCH. Journals (never blocks, never modifies) an edit that
+  // brings a look-alike into a row that had none. A row that already carries one is not journaled again on
+  // every later edit; the PATCH response still warns each time (src/web/routes/memories.ts).
+  db.exec('DROP TRIGGER IF EXISTS homoglyph_memories_au')
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS homoglyph_memories_au AFTER UPDATE OF content ON memories
+    WHEN new.content IS NOT old.content
+     AND (${triggerLikeClause('NEW.content')})
+     AND NOT (${triggerLikeClause('OLD.content')})
+    BEGIN
+      INSERT INTO homoglyph_findings (src_table, src_id, sample, found_at)
+      VALUES ('memories', NEW.id, substr(NEW.content, 1, 120), CAST(strftime('%s','now') AS INTEGER));
     END
   `)
 
@@ -924,6 +938,12 @@ export function initDatabase(dbPathOverride?: string): void {
   // sets it; POST /api/messages never does, so a 1 here is authenticated by construction.
   // 0 for every older row.
   try { db.exec('ALTER TABLE agent_messages ADD COLUMN stop_authorized INTEGER NOT NULL DEFAULT 0') } catch { /* exists */ }
+  // Card 5e4110d7 (HEX 3570, direction A): what the sender expects of the recipient. 'task' (the default, and what every
+  // older row and every unmarked message is) is work the sender hands over and may wait on; 'info' is "no reply needed".
+  // The restart gate counts an unfinished 'task' as work in flight (getDispatchedPendingStats) and an 'info' as nothing:
+  // a conversational message is never closed with a result, so before this it held the gate for the whole staleness
+  // window. The default is the safe side: an unmarked message still counts, exactly as before.
+  try { db.exec("ALTER TABLE agent_messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'task'") } catch { /* exists */ }
 
   // INVARIANT: a row that says 'delivered' must carry a delivered_at.
   //
@@ -1531,9 +1551,6 @@ export function initDatabase(dbPathOverride?: string): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_otel_spans_trace ON otel_spans(trace_id, start_ms)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_otel_spans_agent ON otel_spans(agent_id, start_ms)`)
-  // Same reason as idx_convlog_created: the retention sweep filters on start_ms
-  // alone, which neither composite index above can serve.
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_otel_spans_start ON otel_spans(start_ms)`)
 
   // One-shot migration from the old JSON file (which had a read-modify-write
   // race). Import rows if they exist, then rename the file so we don't keep
@@ -1668,6 +1685,18 @@ export interface Memory {
   embedding: string | null
 }
 
+// 7a21ded9 / Sam 3540: EVERY writer of a memory's vector goes through this one guarded UPDATE. The vector is
+// computed from a snapshot of (content, keywords) taken BEFORE a slow call to the embedding backend; by the
+// time it comes back the row may have been edited, and an unguarded `WHERE id = ?` would then store a vector
+// of the OLD text on the NEW text, for good (the backfill only looks at NULL). Written only while the row
+// still holds exactly the text the vector was made from. `onlyIfNull` keeps a fresher vector that another
+// writer has already stored (the refill and the backfill). Returns whether a row was written.
+function storeEmbeddingIfCurrent(id: number, emb: number[], content: string, keywords: string | null, onlyIfNull: boolean): boolean {
+  return db.prepare(
+    `UPDATE memories SET embedding = ? WHERE id = ? AND content = ? AND keywords IS ?${onlyIfNull ? ' AND embedding IS NULL' : ''}`,
+  ).run(JSON.stringify(emb), id, content, keywords).changes > 0
+}
+
 export function saveMemory(
   chatId: string,
   content: string,
@@ -1693,9 +1722,7 @@ export function saveMemory(
   // one memory was missing from semantic search until the Dream Engine
   // backfilled it by hand.
   generateEmbedding(content).then(emb => {
-    if (emb) {
-      db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(JSON.stringify(emb), id)
-    }
+    if (emb) storeEmbeddingIfCurrent(id, emb, content, null, false)
   }).catch(() => {})
 }
 
@@ -1973,9 +2000,7 @@ export function saveAgentMemory(
 
   // Fire-and-forget: generate embedding asynchronously
   generateEmbedding(content + (keywords ? ' ' + keywords : '')).then(emb => {
-    if (emb) {
-      db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(JSON.stringify(emb), id)
-    }
+    if (emb) storeEmbeddingIfCurrent(id, emb, content, keywords ?? null, false)
   }).catch(() => {})
 
   return { id }
@@ -3577,7 +3602,12 @@ export interface AgentMessage {
   // Card 71263d15 (C): 1 = a STOP from an authenticated writer (see the migration). Optional in the type
   // only because rows built in code before the column (tests, fixtures) do not carry it.
   stop_authorized?: number
+  // Card 5e4110d7: 'task' | 'info' (see the migration). Optional in the type for the same reason as the two above.
+  kind?: MessageKind
 }
+
+export type MessageKind = 'task' | 'info'
+export const MESSAGE_KINDS: readonly MessageKind[] = ['task', 'info']
 
 export function createAgentMessage(
   from: string,
@@ -3585,7 +3615,7 @@ export function createAgentMessage(
   content: string,
   originNote?: string | null,
   traceCtx?: { trace_id: string; span_id: string; parent_span_id: string | null } | null,
-  opts?: { urgent?: boolean; stopAuthorized?: boolean; priority?: 0 | 1 },
+  opts?: { urgent?: boolean; stopAuthorized?: boolean; kind?: MessageKind; priority?: 0 | 1 },
 ): AgentMessage {
   const now = Math.floor(Date.now() / 1000)
   // Card 795d1f48 (a): urgent only when a caller asks for it; the callers that may are the in-process writers and the
@@ -3594,12 +3624,14 @@ export function createAgentMessage(
   // Card 71263d15 (C): STOP authority only when an in-process caller asks for it; POST /api/messages never does
   // (a listed device key's STOP rides on its urgent flag instead: message-router-window.ts isStopMessage).
   const stopAuthorized = opts?.stopAuthorized === true ? 1 : 0
+  // Card 5e4110d7: anything but the literal 'info' is a task, so a caller cannot make a typo quiet.
+  const kind: MessageKind = opts?.kind === 'info' ? 'info' : 'task'
   // Card ad771121: the stored delivery priority (0 normal, 1 high), as the caller decided it (the route's
   // per-pair budget, decidePriority). An urgent row is above high by its own column; the route stores it 0.
   const priority: 0 | 1 = opts?.priority === 1 ? 1 : 0
   const info = db.prepare(
-    'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, origin_note, trace_id, span_id, parent_span_id, urgent, stop_authorized, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-  ).run(from, to, content, 'pending', now, originNote ?? null, traceCtx?.trace_id ?? null, traceCtx?.span_id ?? null, traceCtx?.parent_span_id ?? null, urgent, stopAuthorized, priority)
+    'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, origin_note, trace_id, span_id, parent_span_id, urgent, stop_authorized, kind, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(from, to, content, 'pending', now, originNote ?? null, traceCtx?.trace_id ?? null, traceCtx?.span_id ?? null, traceCtx?.parent_span_id ?? null, urgent, stopAuthorized, kind, priority)
   return {
     id: Number(info.lastInsertRowid),
     from_agent: from, to_agent: to, content, status: 'pending',
@@ -3610,6 +3642,7 @@ export function createAgentMessage(
     parent_span_id: traceCtx?.parent_span_id ?? null,
     urgent,
     stop_authorized: stopAuthorized,
+    kind,
     priority,
   }
 }
@@ -4023,6 +4056,14 @@ export function getDispatchedPendingStats(
   // permanent 1. The main agent was immune only by accident: its alert is
   // self-addressed, which `to_agent != from_agent` already dropped.
   //
+  // The same count feeds the dashboard's queue view (web/queue-view.ts, the "INTER-AGENT (valaszra var)" block), so an
+  // 'info' message drops out of that list too: it is not waiting for an answer.
+  // Card 5e4110d7 (HEX 3570): a message the sender marked 'info' ("no reply needed") is not work in flight either.
+  // Direction A of three (explicit marking at send time; the others, "no reply yet" and a shorter window for
+  // 'delivered', guess). An UNMARKED message is a 'task' and counts exactly as before, so a sender that never learns
+  // the switch leaves the gate as strict as it was; the marking can only make the gate quieter for a sender that
+  // said so itself.
+  //
   // The exclusion is deliberately NARROW: a genuinely open report SHOULD hold a
   // restart back, that is the whole point of this signal. The only thing
   // filtered is the gate's own noise about itself. Widening this to all pending
@@ -4062,7 +4103,8 @@ export function getDispatchedPendingStats(
        AND status IN ('pending','delivered')
        AND content NOT LIKE ?
        AND COALESCE(result, '') NOT LIKE ?
-       AND COALESCE(origin_note, '') != '${GATE_ALERT_ORIGIN_NOTE}'`
+       AND COALESCE(origin_note, '') != '${GATE_ALERT_ORIGIN_NOTE}'
+       AND COALESCE(kind, 'task') != 'info'`
     + (reportsUpward ? `
        AND to_agent != ?` : '')
   const bindings = reportsUpward
@@ -4689,16 +4731,32 @@ export async function hybridSearch(
   return ranked.slice(0, limit).map(([id]) => byId.get(id)!)
 }
 
+// 7a21ded9: an edit drops the stored vector to NULL (updateMemory) because it described the old text, and
+// until now only the nightly backfill brought it back, so a corrected memory was invisible to the semantic
+// search for up to a day. This is the fire-and-forget refill the POST path already does, for the edit
+// path: it re-reads the row, embeds what is stored NOW, and writes the vector only if the row still holds
+// that exact text (a second edit while the call was in flight has already set the vector to NULL again and
+// owns the next refill). No-op when the row has a vector. Never throws; false = nothing written.
+export async function refreshMemoryEmbedding(id: number): Promise<boolean> {
+  try {
+    const row = db.prepare('SELECT content, keywords, embedding FROM memories WHERE id = ?').get(id) as
+      { content: string; keywords: string | null; embedding: string | null } | undefined
+    if (!row || row.embedding !== null) return false
+    const emb = await generateEmbedding(row.content + (row.keywords ? ' ' + row.keywords : ''))
+    if (!emb) return false
+    return storeEmbeddingIfCurrent(id, emb, row.content, row.keywords, true)
+  } catch {
+    return false
+  }
+}
+
 export async function backfillEmbeddings(): Promise<number> {
   const rows = db.prepare('SELECT id, content, keywords FROM memories WHERE embedding IS NULL').all() as { id: number; content: string; keywords: string | null }[]
   let count = 0
   for (const row of rows) {
     const text = row.content + (row.keywords ? ' ' + row.keywords : '')
     const emb = await generateEmbedding(text)
-    if (emb) {
-      db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(JSON.stringify(emb), row.id)
-      count++
-    }
+    if (emb && storeEmbeddingIfCurrent(row.id, emb, row.content, row.keywords, true)) count++
     // Small delay to not overwhelm Ollama
     await new Promise(r => setTimeout(r, 100))
   }
@@ -5475,124 +5533,6 @@ export function getTokenPruneLag(): TokenPruneLag {
     Math.floor(Date.now() / 1000),
     (TOKEN_PRUNE_TOLERANCE_CYCLES * DECAY_SWEEP_INTERVAL_MS) / 3_600_000,
   )
-}
-
-// Retention window for one of the opt-in prunes below, or null when the owner
-// has not switched it on. These four tables (conversation_log, otel_spans,
-// agent_messages, tool_call_log) keep everything by default: 0 means "keep
-// forever", and so does a value that does not parse to a positive integer
-// (an empty .env entry, a hand-edited override). Deleting history on an
-// install whose owner never asked for it is the one failure mode here that
-// cannot be undone, so anything other than a positive day count is a no-op.
-function optInRetentionDays(key: string): number | null {
-  const days = Number(getEffectiveSettingValue(key))
-  return Number.isFinite(days) && days > 0 ? days : null
-}
-
-// Prune conversation_log rows older than CONVERSATION_LOG_RETENTION_DAYS.
-// Opt-in: 0 / unset keeps everything (see optInRetentionDays).
-// `created_at` is unix SECONDS. Served by idx_convlog_created.
-export function pruneConversationLog(): number {
-  const retentionDays = optInRetentionDays('CONVERSATION_LOG_RETENTION_DAYS')
-  if (retentionDays === null) return 0
-  const cutoff = Math.floor(Date.now() / 1000) - retentionDays * 86400
-  return db.prepare('DELETE FROM conversation_log WHERE created_at < ?').run(cutoff).changes
-}
-
-// Prune otel_spans older than OTEL_SPAN_RETENTION_DAYS (opt-in, 0 = keep
-// forever). `start_ms` is unix
-// MILLISECONDS (unlike every other table here, which uses seconds). Spans still
-// marked 'running' are pruned too: a span that never got an end_ms within the
-// retention window is not in flight, it is a leaked row from a crashed process.
-export function pruneOtelSpans(): number {
-  const retentionDays = optInRetentionDays('OTEL_SPAN_RETENTION_DAYS')
-  if (retentionDays === null) return 0
-  const cutoffMs = Date.now() - retentionDays * 86400 * 1000
-  return db.prepare('DELETE FROM otel_spans WHERE start_ms < ?').run(cutoffMs).changes
-}
-
-// Prune settled agent_messages older than AGENT_MESSAGE_RETENTION_DAYS
-// (opt-in, 0 = keep forever).
-// Deliberately limited to 'done' and 'failed': a 'pending' or 'delivered' row
-// that is still around after weeks means delivery or processing got stuck, and
-// silently deleting it would erase the only evidence of that. Stuck rows are a
-// signal, not garbage -- they stay until someone looks at them.
-export function pruneAgentMessages(): number {
-  const retentionDays = optInRetentionDays('AGENT_MESSAGE_RETENTION_DAYS')
-  if (retentionDays === null) return 0
-  const cutoff = Math.floor(Date.now() / 1000) - retentionDays * 86400
-  return db
-    .prepare("DELETE FROM agent_messages WHERE created_at < ? AND status IN ('done','failed')")
-    .run(cutoff)
-    .changes
-}
-
-// Prune tool_call_log to TOOL_CALL_LOG_RETENTION_DAYS (opt-in, 0 = keep
-// forever). Thin wrapper over
-// pruneToolCallLog() so the daily sweep reads the configured retention instead
-// of that function's 24-hour call-site default (which the dashboard endpoint
-// still uses for an explicit manual purge).
-export function pruneToolCallLogRetention(): number {
-  const retentionDays = optInRetentionDays('TOOL_CALL_LOG_RETENTION_DAYS')
-  if (retentionDays === null) return 0
-  const cutoff = Math.floor(Date.now() / 1000) - retentionDays * 86400
-  return db.prepare('DELETE FROM tool_call_log WHERE created_at < ?').run(cutoff).changes
-}
-
-/** Fraction of the DB that must be free pages before a VACUUM is worth it. */
-const VACUUM_FREE_RATIO = 0.2
-/** Below this many free pages a VACUUM cannot reclaim anything meaningful. */
-const VACUUM_MIN_FREE_PAGES = 1000
-
-export interface CompactResult {
-  /** WAL frames still in the log after the checkpoint (0 means fully drained). */
-  walFramesLeft: number
-  /** True when the checkpoint could not run because a reader/writer held the DB. */
-  checkpointBusy: boolean
-  vacuumed: boolean
-  freePagesBefore: number
-}
-
-// Drain the WAL and, when the file has enough dead space to be worth it, VACUUM.
-//
-// Without an explicit checkpoint the WAL only auto-truncates on the last
-// connection closing, which for a long-running daemon is "never" -- the sidecar
-// then grows past the DB itself. TRUNCATE both applies the frames and shrinks
-// the file back to zero.
-//
-// VACUUM is gated on free-page ratio because it rewrites the whole DB under an
-// exclusive lock; running it daily on a healthy file is pure I/O for no gain.
-// Both steps tolerate SQLITE_BUSY: another connection is mid-write, and the
-// next daily sweep will get it.
-export function checkpointAndCompact(): CompactResult {
-  const result: CompactResult = { walFramesLeft: -1, checkpointBusy: false, vacuumed: false, freePagesBefore: 0 }
-
-  try {
-    // better-sqlite3 returns [{ busy, log, checkpointed }] for wal_checkpoint.
-    const rows = db.pragma('wal_checkpoint(TRUNCATE)') as Array<{ busy: number; log: number; checkpointed: number }>
-    const row = rows?.[0]
-    if (row) {
-      result.checkpointBusy = row.busy === 1
-      result.walFramesLeft = row.log
-    }
-  } catch (err) {
-    result.checkpointBusy = true
-    logger.warn({ err }, 'WAL checkpoint sikertelen, a kovetkezo sweep ujraprobalja')
-  }
-
-  try {
-    const freePages = Number((db.pragma('freelist_count', { simple: true }) as number) ?? 0)
-    const totalPages = Number((db.pragma('page_count', { simple: true }) as number) ?? 0)
-    result.freePagesBefore = freePages
-    if (freePages >= VACUUM_MIN_FREE_PAGES && totalPages > 0 && freePages / totalPages >= VACUUM_FREE_RATIO) {
-      db.exec('VACUUM')
-      result.vacuumed = true
-    }
-  } catch (err) {
-    logger.warn({ err }, 'VACUUM sikertelen, a kovetkezo sweep ujraprobalja')
-  }
-
-  return result
 }
 
 // --- Vault SSH Keys (shared key pool) ---

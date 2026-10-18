@@ -31,6 +31,16 @@ set -u
 # channel state dir points at a live access.json / bot token.
 unset TELEGRAM_STATE_DIR SLACK_STATE_DIR DISCORD_STATE_DIR GOOGLECHAT_STATE_DIR TEAMS_STATE_DIR
 
+# The script under test chunks the briefing and reads access.json with `node`. It exports its own PATH
+# (`$HOME/.local/bin:...:/usr/bin:/bin`) and the tests run it with HOME=<throwaway install>, so a node that
+# lives under the REAL home (nvm, ~/.local/bin) is invisible to it: "node: command not found", nothing
+# delivered, nothing stamped. That turned five cases red on a host with such a node (card 40b1d745, measured
+# 2026-10-13: PASS=11 FAIL=5) while a host with node in /usr/bin was green. The throwaway install gets a
+# symlink to the node this test runs under (provide_node below); with no node at all the suite cannot say
+# anything, so it stops here instead of reporting five failures that look like product bugs.
+NODE_BIN="$(command -v node 2>/dev/null || true)"
+[ -n "$NODE_BIN" ] || { echo "FATAL: node not found on PATH -- the briefing script needs it (chunking, access.json)"; exit 1; }
+
 PASS=0; FAIL=0
 pass() { PASS=$((PASS + 1)); echo "  PASS: $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1"; }
@@ -76,6 +86,12 @@ for _ in $(seq 1 50); do [ -s "$PORTFILE" ] && break; sleep 0.1; done
 [ -s "$PORTFILE" ] || { echo "FATAL: Bot API stub did not start"; exit 1; }
 export TELEGRAM_API_BASE="http://127.0.0.1:$(cat "$PORTFILE")"
 
+# Makes node resolvable for a script that runs with HOME=$1 (see NODE_BIN above).
+provide_node() {
+  mkdir -p "$1/.local/bin"
+  ln -sf "$NODE_BIN" "$1/.local/bin/node"
+}
+
 # Builds a throwaway install with a `claude` stub, runs the briefing, and
 # echoes the resulting stamp content ("<none>" if unstamped).
 #   $1: stub mode -- what the fake run prints:
@@ -92,6 +108,7 @@ run_case() {
   local mode="$1" stub_rc="$2" chat_id="${3:-1234}" with_access="${4:-0}" tok="${5:-tok-ok}"
   local dir="$TMP/inst.$RANDOM"
   mkdir -p "$dir/scripts/lib" "$dir/store" "$dir/bin"
+  provide_node "$dir"
   cp "$REPO/scripts/morning-briefing.sh" "$dir/scripts/"
   cp "$REPO/scripts/lib/owner-chat.sh" "$REPO/scripts/lib/send-telegram.sh" "$dir/scripts/lib/"
   printf 'ALLOWED_CHAT_ID=%s\n' "$chat_id" > "$dir/.env"
@@ -179,6 +196,7 @@ run_case_argv() {
   local mode="$1" stub_rc="$2" chat_id="$3" with_access="$4"
   local dir="$TMP/inst.$RANDOM"
   mkdir -p "$dir/scripts/lib" "$dir/store" "$dir/bin"
+  provide_node "$dir"
   cp "$REPO/scripts/morning-briefing.sh" "$dir/scripts/"
   cp "$REPO/scripts/lib/owner-chat.sh" "$REPO/scripts/lib/send-telegram.sh" "$dir/scripts/lib/"
   printf 'ALLOWED_CHAT_ID=%s\n' "$chat_id" > "$dir/.env"

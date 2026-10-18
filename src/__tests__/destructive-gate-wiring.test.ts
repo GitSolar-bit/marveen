@@ -62,7 +62,9 @@ afterEach(cleanup)
 // fixture file there would show up in listProfileTemplates() and leak into
 // other suites running in the same worker.
 const GATED: ProfileTemplate = { ...loadProfileTemplate('default'), destructiveGate: true }
-const UNGATED: ProfileTemplate = loadProfileTemplate('default')
+// Explicitly off: this install ships `default` with the flag ON (the operator's
+// decision, see FLEET_GATED_PROFILES below), so the opt-out case has to say so.
+const UNGATED: ProfileTemplate = { ...loadProfileTemplate('default'), destructiveGate: false }
 
 function render(name: string, profile: ProfileTemplate = GATED): string {
   mkdirSync(join(agentRoot(name), '.claude'), { recursive: true })
@@ -85,8 +87,18 @@ describe('scope: who gets the destructive gate', () => {
     expect(agentGetsDestructiveGate(TEST_AGENT, UNGATED)).toBe(false)
   })
 
-  it('no shipped template opts in', () => {
-    for (const p of listProfileTemplates()) expect(p.destructiveGate).not.toBe(true)
+  // Upstream asserted NONE here. This install's operator switched the gate on for
+  // the profiles its four sub-agents run (igor, sam, willy, zola), so the case is
+  // STRICTER, not looser: the set of opted-in templates must be EXACTLY this list.
+  // A fifth profile that quietly opts in, or one of these three dropping the flag,
+  // both go red.
+  const FLEET_GATED_PROFILES = ['default', 'developer-senior', 'marketer']
+  it('exactly the fleet profiles opt in, and no other shipped template does', () => {
+    const optedIn = listProfileTemplates()
+      .filter((p) => p.destructiveGate === true)
+      .map((p) => p.id)
+      .sort()
+    expect(optedIn).toEqual([...FLEET_GATED_PROFILES].sort())
   })
 
   it('the main agent does NOT -- the card is explicit, do not break it', () => {
@@ -165,7 +177,9 @@ describe('the startup migration for the EXISTING fleet', () => {
     render(TEST_AGENT, UNGATED)
     const path = settingsFor(TEST_AGENT)
     expect(readFileSync(path, 'utf-8')).not.toContain('destructive-gate.py')
-    ensureGovernanceGateCommands(TEST_AGENT)
+    // The explicit profile matters here: without it the probe resolves to the
+    // shipped `default`, which this install now opts in.
+    ensureGovernanceGateCommands(TEST_AGENT, UNGATED)
     expect(readFileSync(path, 'utf-8')).not.toContain('destructive-gate.py')
   })
 

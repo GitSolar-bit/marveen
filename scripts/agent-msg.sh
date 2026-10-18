@@ -8,10 +8,31 @@
 # the HTTP status AND the returned message id, and RETRIES on failure. A message counts as sent only
 # when an id came back.
 #
-# Usage:  bash scripts/agent-msg.sh [--priority high|normal] <from> <to> "<content>"
-#   content: plain text (quotes / newlines OK) -- the body is built with json.dumps (no quoting pitfalls).
-#   large / multi-line content may come from STDIN when the 3rd arg is "-":
-#     echo "<long text>" | bash scripts/agent-msg.sh <from> <to> -
+# Usage:  bash scripts/agent-msg.sh [--info] [--priority high|normal] <from> <to> "<content>"
+#   --info (a leading switch, before <from>): the message needs no reply or action ("FYI", a status, a thank-you). It is sent with
+#   kind=info and does not count as work in flight for the restart gate. Without it the message is a task, which
+#   is what the gate has always assumed, so leaving the switch out is always safe. Use it for what you would
+#   not wait for an answer to; a delegated task, a question or anything you expect a result for goes WITHOUT it.
+#   content: the helper sends EXACTLY the text it receives, JSON-encoded with json.dumps, so nothing is lost
+#   AFTER it starts. What it cannot see is what YOUR SHELL did to the argument before it started (MSGIDEZES927,
+#   measured 2026-09-27, a hook name and a command name vanished from a real message):
+#     "double quotes"  a `backtick word` and a $(command) are EXECUTED by the calling shell and replaced by
+#                      their output; $VAR is expanded; a backslash before $ ` " \ or a newline is eaten
+#                      (`C:\temp` survives, `\$HOME` becomes a literal $HOME);
+#     'single quotes'  those survive, but a single quote inside the text ends the string.
+#   Text with a backtick, $(, $VAR, a quote or a backslash goes through STDIN with a QUOTED heredoc delimiter,
+#   which expands nothing (the 3rd arg is "-"):
+#     bash scripts/agent-msg.sh <from> <to> - <<'MSG'
+#     ...the text, verbatim...
+#     MSG
+#   TWO LIMITS of that route. (1) The delimiter must not appear in the text as a line of its own: a line that is
+#   exactly MSG ends the heredoc there, and every line after it RUNS AS A SHELL COMMAND in the calling shell while
+#   the helper reports OK for the shortened message (measured by Sam, card 639c7ba5). A message that quotes this
+#   very pattern contains such a line: pick another delimiter, or write the text to a file and use `- < file`.
+#   (2) Empty lines at the END of the text are dropped (the helper reads the text with $(cat)); the beginning and
+#   the empty lines inside survive.
+#   `- < file` (or `cat file | ...`) is the same route. `echo "..."` is NOT: its double quotes expand first,
+#   exactly like the argument. Plain text without those characters may be passed as the argument.
 # Output: success -> "OK id=<n> queue=<depth> (~<n> min)"; failure -> "FAIL <reason>"
 #         + a line in store/agent-msg-failures.log, exit 1.
 #   The queue fields come from the POST response: a message is accepted instantly
@@ -63,11 +84,21 @@ TOKEN_FILE="${MARVEEN_TOKEN_FILE:-$BASE/store/.dashboard-token}"
 URL="${API_BASE}/api/messages"
 LOG="$BASE/store/agent-msg-failures.log"
 
+KIND=""
 PRIORITY=""; PRIORITY_GIVEN=0
-case "${1:-}" in
-  --priority) PRIORITY_GIVEN=1; PRIORITY="${2:-}"; if [ "$#" -ge 2 ]; then shift 2; else shift; fi ;;
-  --priority=*) PRIORITY_GIVEN=1; PRIORITY="${1#--priority=}"; shift ;;
-esac
+# The leading switches, in any order: --info (card 5e4110d7) and --priority (card ad771121). Each may stand only
+# before <from>; a second --priority is refused here, like one anywhere else, so nothing is silently overridden.
+while :; do
+  case "${1:-}" in
+    --info) KIND="info"; shift ;;
+    --priority|--priority=*)
+      if [ "$PRIORITY_GIVEN" = 1 ]; then echo "FAIL: --priority given twice; nothing was sent"; exit 1; fi
+      PRIORITY_GIVEN=1
+      if [ "$1" = "--priority" ]; then PRIORITY="${2:-}"; if [ "$#" -ge 2 ]; then shift 2; else shift; fi
+      else PRIORITY="${1#--priority=}"; shift; fi ;;
+    *) break ;;
+  esac
+done
 # Measured by the card's independent test (card ad771121): an empty value went out as normal, a switch
 # after the content was silently dropped, and one after the sender took the recipient's place. A given
 # switch must carry one of the two words, and it may stand only before <from>.
@@ -76,7 +107,7 @@ if [ "$PRIORITY_GIVEN" = 1 ] && [ "$PRIORITY" != "high" ] && [ "$PRIORITY" != "n
 fi
 for arg in "$@"; do
   case "$arg" in
-    --priority|--priority=*) echo "FAIL: --priority goes before <from>: agent-msg.sh [--priority high|normal] <from> <to> <content>; nothing was sent"; exit 1 ;;
+    --priority|--priority=*) echo "FAIL: --priority goes before <from>: agent-msg.sh [--info] [--priority high|normal] <from> <to> <content>; nothing was sent"; exit 1 ;;
   esac
 done
 FROM="${1:?from required}"; TO="${2:?to required}"; C="${3:?content required (or - for STDIN)}"
@@ -134,8 +165,9 @@ else
   echo "WARN: homoglyph checker not found at $HG -- sending UNCHECKED." >&2
 fi
 
-BODY="$(FROM="$FROM" TO="$TO" C="$C" P="$PRIORITY" python3 -c 'import json,os
+BODY="$(FROM="$FROM" TO="$TO" C="$C" KIND="$KIND" P="$PRIORITY" python3 -c 'import json,os
 d={"from":os.environ["FROM"],"to":os.environ["TO"],"content":os.environ["C"]}
+if os.environ.get("KIND")=="info": d["kind"]="info"
 if os.environ.get("P"): d["priority"]=os.environ["P"]
 print(json.dumps(d))')"
 

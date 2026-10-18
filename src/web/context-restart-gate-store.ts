@@ -70,6 +70,13 @@ export interface GateRunState {
    * woken on the next sweep instead of silently mute.
    */
   pendingWakeAt: number | null
+  /**
+   * RIASZTALLIT924: how many sweeps of the CURRENT blocking streak could not read the context size (a fresh
+   * session reads null for about a minute). The streak clock above keeps running through them (nextBlockClock
+   * hands the old value back), so these are minutes the alert counts without having measured them; the alert
+   * says how many. Reset when the streak ends.
+   */
+  unmeasuredTicks: number
 }
 
 const EMPTY_STATE: GateRunState = {
@@ -77,6 +84,7 @@ const EMPTY_STATE: GateRunState = {
   lastAlertAt: null,
   lastClearAt: null,
   pendingWakeAt: null,
+  unmeasuredTicks: 0,
 }
 
 function readStateRaw(): Record<string, unknown> {
@@ -95,7 +103,18 @@ function normalizeState(raw: unknown): GateRunState {
     lastAlertAt:    msOrNull(o.lastAlertAt),
     lastClearAt:    msOrNull(o.lastClearAt),
     pendingWakeAt:  msOrNull(o.pendingWakeAt),
+    unmeasuredTicks: (typeof o.unmeasuredTicks === 'number' && Number.isFinite(o.unmeasuredTicks) && o.unmeasuredTicks > 0)
+      ? Math.floor(o.unmeasuredTicks) : 0,
   }
+}
+
+/**
+ * The run state right after a /clear was sent: the streak is over (clock and unmeasured-sweep count are zeroed:
+ * a count left over from the old session would be inherited by the NEXT streak, RIASZTALLIT924), the clear time
+ * is stamped, and the fresh session is owed a wake nudge.
+ */
+export function stateAfterClear(prev: GateRunState, nowMs: number): GateRunState {
+  return { ...prev, firstBlockedAt: null, unmeasuredTicks: 0, lastClearAt: nowMs, pendingWakeAt: nowMs }
 }
 
 export function readGateRunState(name: string): GateRunState {

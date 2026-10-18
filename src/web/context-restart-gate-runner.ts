@@ -20,7 +20,7 @@ import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { configDirFor, newestMainConfigRoot } from './main-transcript-root.js'
 import { withSessionSendLock } from './session-send-lock.js'
 import { getHardGuardPhase } from './context-guard-runner.js'
-import { readGateConfig, readGateRunState, writeGateRunState } from './context-restart-gate-store.js'
+import { readGateConfig, readGateRunState, writeGateRunState, stateAfterClear } from './context-restart-gate-store.js'
 import {
   getDispatchedPendingStats,
   createAgentMessage,
@@ -30,6 +30,8 @@ import {
   decideGate,
   decideWake,
   nextBlockClock,
+  nextUnmeasuredTicks,
+  blockAlertEscalation,
   WAKE_DELAY_MS,
   type GateInputs,
 } from '../context-restart-gate.js'
@@ -768,13 +770,8 @@ export async function performSoftClear(
   // hooks fire on the next boot and inject the fresh context snapshot.
   await sendSlashCommand(session, '/clear')
   logger.info({ agent: name, contextTokens }, 'context-restart-gate: /clear sent')
-  writeGateRunState(name, {
-    ...readGateRunState(name),
-    firstBlockedAt: null,
-    lastClearAt: nowMs,
-    // Owe the fresh session a wake nudge; see WAKE_DELAY_MS.
-    pendingWakeAt: nowMs,
-  })
+  // Streak over, count zeroed, a wake nudge owed to the fresh session (see WAKE_DELAY_MS).
+  writeGateRunState(name, stateAfterClear(readGateRunState(name), nowMs))
   // Fast path: nudge in ~25s rather than at the next sweep (5 min by
   // default). The persisted debt above is the fallback if this is lost.
   await sleep(WAKE_DELAY_MS)
@@ -877,11 +874,9 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
           // alive, and killing it to open the gate would be the gate deciding
           // something that is not its to decide. So the alert escalates in
           // WORDING instead of repeating the same sentence every two hours.
-          const stuckLong = typeof blockedSinceMin === 'number'
-            && blockedSinceMin >= NEVER_CLEARS_MIN
-          const escalation = stuckLong
-            ? ` FIGYELEM: ugyanez az ok ${blockedSinceMin} perce valtozatlan, tehat ez a feltetel magatol valoszinuleg NEM fog megszunni. Ez lelet, nem varakozas: vagy a blokkolo dolgot kell lezarni, vagy a kaput kell ra felkesziteni.`
-            : ''
+          const escalation = blockAlertEscalation(
+            blockedSinceMin, decision.reason, runState.unmeasuredTicks ?? 0, NEVER_CLEARS_MIN,
+          )
           // SENDER AND PREFIX BOTH MATTER HERE (GATESENDER922).
           //
           // This used to be createAgentMessage(name, ...), i.e. the supervisory
@@ -928,8 +923,10 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
       const firstBlockedAt = nextBlockClock(
         runState.firstBlockedAt, inputs.contextTokens, cfg.thresholdTokens, nowMs,
       )
-      if (firstBlockedAt !== runState.firstBlockedAt) {
-        writeGateRunState(name, { ...runState, firstBlockedAt })
+      // RIASZTALLIT924: the sweeps the clock ran through without a reading are counted, so the alert can say so.
+      const unmeasuredTicks = nextUnmeasuredTicks(runState.unmeasuredTicks ?? 0, inputs.contextTokens, firstBlockedAt)
+      if (firstBlockedAt !== runState.firstBlockedAt || unmeasuredTicks !== (runState.unmeasuredTicks ?? 0)) {
+        writeGateRunState(name, { ...runState, firstBlockedAt, unmeasuredTicks })
       }
       break
     }

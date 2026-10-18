@@ -22,6 +22,13 @@ fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1"; }
 assert_eq() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (expected '$2', got '$3')"; fi; }
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+# The script under test calls `node` (chunking, the Slack/owner-chat helpers) with a PATH it builds itself
+# from $HOME/.local/bin and the system dirs, and these tests run it with HOME=<throwaway install>. A node
+# under the REAL home (nvm, ~/.local/bin) is invisible to it, so on such a host every case dies with "node:
+# command not found" (card 40b1d745, measured 2026-10-13). The throwaway install gets a symlink to the node
+# this test runs under; with no node at all the suite cannot say anything, so it stops.
+NODE_BIN="$(command -v node 2>/dev/null || true)"
+[ -n "$NODE_BIN" ] || { echo "FATAL: node not found on PATH -- the briefing script needs it"; exit 1; }
 TMP="$(mktemp -d)"
 TODAY="$(date +%F)"
 
@@ -64,6 +71,7 @@ run_case() {
   local name="$1" tok="$2" chat="$3" target="$4" ntg="$5" smode="$6"
   DIR="$TMP/$name"
   mkdir -p "$DIR/scripts/lib" "$DIR/store" "$DIR/bin" "$DIR/dist"
+  mkdir -p "$DIR/.local/bin"; ln -sf "$NODE_BIN" "$DIR/.local/bin/node"
   cp "$REPO/scripts/morning-briefing.sh" "$REPO/scripts/slack-notify.mjs" "$DIR/scripts/"
   cp "$REPO/scripts/lib/owner-chat.sh" "$REPO/scripts/lib/send-telegram.sh" "$DIR/scripts/lib/"
   : > "$DIR/.env"

@@ -1,5 +1,5 @@
 import { CronExpressionParser } from 'cron-parser'
-import { APP_TZ, SCHEDULER_TZ_CONFIGURED, usableHostTz } from '../config.js'
+import { APP_TZ, SCHEDULER_TZ_CONFIGURED } from '../config.js'
 
 // All scheduled-task cron expressions (SKILL.md/task-config.json, the
 // dashboard schedule editor) are authored in the operator's own wall-clock
@@ -63,9 +63,7 @@ export function effectiveCronTz(): { tz: string; source: CronTzSource } {
   return resolveCronTz(
     SCHEDULER_TZ_CONFIGURED,
     process.env,
-    // The host zone APP_TZ actually uses (UTC when the raw one is unusable),
-    // so the startup report names the zone in effect, not one config.ts refused.
-    usableHostTz(),
+    Intl.DateTimeFormat().resolvedOptions().timeZone,
   )
 }
 

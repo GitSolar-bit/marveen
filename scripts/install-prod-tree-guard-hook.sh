@@ -214,7 +214,7 @@ MAIN_ID="${MAIN_ID:-marveen}"
 # and one that does not keeps an alert that arrives.
 # The .env line is read the way the server reads it (src/env-parse.ts parseEnvContent):
 # every line trimmed, blank and # lines skipped, split at the FIRST "=", key and value
-# trimmed, ONE pair of matching surrounding quotes stripped, and the LAST occurrence of
+# trimmed, a trailing " #" comment outside quotes cut (card 6600f89b), ONE pair of matching surrounding quotes stripped, and the LAST occurrence of
 # the key wins. The last part is the one that matters: this used to be `head -1`, so a
 # .env with two SYSTEM_SENDER_IDS lines (first lists the guard, last does not) made the
 # hook send as prod-tree-guard while the server had never registered it, and the alert was
@@ -223,14 +223,26 @@ MAIN_ID="${MAIN_ID:-marveen}"
 ENV_SYSTEM_SENDERS=""
 if [ -r "$PROD_ROOT/.env" ]; then
   ENV_SYSTEM_SENDERS="$(awk '
+    # trailing ` #` comment outside quotes: the same rule as stripTrailingComment in src/env-parse.ts
+    function cut(raw,   i, c, q) {
+      q = ""
+      for (i = 1; i <= length(raw); i++) {
+        c = substr(raw, i, 1)
+        if (q != "") { if (c == q) q = ""; continue }
+        if (c == "\042" || c == "\047") { q = c; continue }
+        if (c == "#" && i > 1 && (substr(raw, i - 1, 1) == " " || substr(raw, i - 1, 1) == "\t")) return substr(raw, 1, i - 1)
+      }
+      return raw
+    }
     { line = $0
       sub(/^[ \t\r]+/, "", line); sub(/[ \t\r]+$/, "", line)
       if (line == "" || substr(line, 1, 1) == "#") next
       i = index(line, "=")
       if (i == 0) next
       k = substr(line, 1, i - 1); v = substr(line, i + 1)
-      gsub(/^[ \t]+|[ \t]+$/, "", k); gsub(/^[ \t]+|[ \t]+$/, "", v)
+      gsub(/^[ \t]+|[ \t]+$/, "", k)
       if (k != "SYSTEM_SENDER_IDS") next
+      v = cut(v); gsub(/^[ \t]+|[ \t]+$/, "", v)
       n = length(v)
       if (n >= 2) {
         a = substr(v, 1, 1); b = substr(v, n, 1)

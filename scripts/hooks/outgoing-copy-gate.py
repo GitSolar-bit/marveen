@@ -242,10 +242,21 @@ def _basename(tok: str) -> str:
 
 def _mask_subshell_markers(cmd: str) -> str:
     """Idezojelen KIVULI ujsor/`$(`/backtick -> `;` szeparator, hogy a shlex
-    szegmens-hatarkent lassa; idezojelen BELUL a szoveg erintetlen (tartalom)."""
+    szegmens-hatarkent lassa; idezojelen BELUL a szoveg erintetlen (tartalom).
+    COMMENTMASK1013 (Sam 3642, az ELO kapun merve): a `#` komment is itt dol el, nem a shlex-ben. A shlex alapertelmezett
+    commenters='#'-je a maszkolt ujsor UTAN a parancs VEGEIG nyelt (`# post\ncurl ... /feed/posts` -> nulla szegmens, a
+    kapu minden csatornan elnemult), es szo kozepen allo `#`-t is kommentnek vett (`curl https://x/y#z -d hi` -> a `-d hi`
+    eltunt). A bash szerint a `#` csak SZO ELEJEN komment (parancs eleje, szokoz/tab, ujsor, vagy ; | & ( ) < > utan): a komment
+    szoveget itt eldobjuk az ujsorig, az ujsor marad (szeparator), a `$#`, `${#x}`, `y#z` erintetlen. Az ELOZO karakter a NYERS
+    parancsbol jon, ezert az elozo sor vegi ujsor is a halmazban van (Sam 3655: nelkule a 2. sortol allo `# it's` komment
+    aposztrofja idezest nyitott, a shlex hibat dobott, es a kapu elnemult, ahol az elo kapu tiltott).
+    ESCAPE (Sam 3659): a `\\`-par UTAN allo `#` a szo resze (`a\\ #b` = EGY szo `a #b`, `a\\;#b`, `a\\)#b`): a nyers elozo karakter
+    (szokoz, `;`, `)`) ilyenkor nem hatar. Ara: `posts \\<ujsor>#x` (a bash-ban komment) tiltas lesz, azaz hamis tiltas a
+    biztonsagos iranyban; a sorvegi folytatas egyebkent sincs lekezelve (a shlex az escape-elt ujsort a tokenben hagyja)."""
     out = []
     q = None  # None | "'" | '"'
     i, n = 0, len(cmd)
+    esc_end = -1   # index right after the last backslash pair outside quotes: that pair is part of the word
     while i < n:
         ch = cmd[i]
         if q:
@@ -257,7 +268,11 @@ def _mask_subshell_markers(cmd: str) -> str:
         if ch in "'\"":
             q = ch; out.append(ch); i += 1; continue
         if ch == "\\" and i + 1 < n:
-            out.append(cmd[i:i + 2]); i += 2; continue
+            out.append(cmd[i:i + 2]); i += 2; esc_end = i; continue
+        if ch == "#" and i != esc_end and (i == 0 or cmd[i - 1] in " \t\n;|&()<>"):
+            j = cmd.find("\n", i)
+            i = n if j < 0 else j
+            continue
         if ch == "\n" or ch == "`":
             out.append(";"); i += 1; continue
         if ch == "$" and i + 1 < n and cmd[i + 1] == "(":
@@ -272,6 +287,7 @@ def _segments_tokens(cmd: str):
     lex = shlex.shlex(_mask_subshell_markers(_HEREDOC.sub(r"\1", cmd)),
                       posix=True, punctuation_chars="();|&")
     lex.whitespace_split = True
+    lex.commenters = ""   # COMMENTMASK1013: comments were cut in _mask_subshell_markers, with bash's rule
     segments, cur = [], []
     for tok in lex:
         # SEGSPLIT923: shlex(punctuation_chars) returns a RUN of operator

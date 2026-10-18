@@ -1,6 +1,6 @@
 import {
   saveAgentMemory, getAgentMemories, searchAgentMemories, getMemoryStats, updateMemory,
-  hybridSearch, backfillEmbeddings,
+  hybridSearch, backfillEmbeddings, refreshMemoryEmbedding,
   searchMemories, getMemoriesForChat, getDb, touchMemoriesAccessed,
   getMemoryById, deleteMemoryById, getMemoryVersions,
   type Memory, type MemoryRow,
@@ -95,6 +95,21 @@ const SUSPICIOUS_PATTERNS = [
 // row within seconds used to lose one edit silently -- last writer wins, and
 // nothing told the loser. updated_at alone cannot serve as the version: it has
 // one-second resolution, so two writes in the same second compare equal.
+// The look-alike findings of `after` that `before` did not already have: per codepoint, the surplus count
+// (the first findings of that codepoint are taken as the old ones, the LAST `surplus` are the added ones).
+export function addedHomoglyphs(before: string, after: string): ReturnType<typeof detectHomoglyphs> {
+  const old = new Map<string, number>()
+  for (const f of detectHomoglyphs(before)) old.set(f.codepoint, (old.get(f.codepoint) ?? 0) + 1)
+  const now = new Map<string, ReturnType<typeof detectHomoglyphs>>()
+  for (const f of detectHomoglyphs(after)) now.set(f.codepoint, [...(now.get(f.codepoint) ?? []), f])
+  const added: ReturnType<typeof detectHomoglyphs> = []
+  for (const [cp, list] of now) {
+    const surplus = list.length - (old.get(cp) ?? 0)
+    if (surplus > 0) added.push(...list.slice(list.length - surplus))
+  }
+  return added.sort((a, b) => a.index - b.index)
+}
+
 export function memoryVersion(content: string | null | undefined): string {
   return createHash('sha256').update(content ?? '').digest('hex').slice(0, 16)
 }
@@ -659,7 +674,25 @@ Respond ONLY with JSON, nothing else:
     // which the if_version flow reads back.
     if (updateMemory(id, effectiveContent, newCategory, agent_id, keywords, updated_by)) {
       const version = memoryVersion(effectiveContent)
-      json(res, mismatch ? { ok: true, version, owner_mismatch: ownerMismatchPayload(id, mismatch) } : { ok: true, version })
+      // 7a21ded9: the edit dropped the stale vector; refill it now instead of at the nightly backfill.
+      // Fire-and-forget (the response does not wait for the embedding backend), a no-op when the edit
+      // left the vector alone (a category-only move).
+      void refreshMemoryEmbedding(id)
+      // HOMOPATCH926 (card 57a4249f): warn-only, exactly like POST -- the write above already happened, and
+      // legitimate Cyrillic / Greek content must never be lost. What is warned about is what this edit ADDS:
+      // a look-alike letter of which the new text has more than the old one (Sam 3540: a clean prepend onto a
+      // legitimate Cyrillic row, and a tier move that resends the unchanged content, warned for text nobody
+      // wrote). Fixing a flagged memory (fewer look-alikes) is silent; adding one, or swapping one for a
+      // different one, warns.
+      const homoglyphs = content !== undefined ? addedHomoglyphs(before.content, effectiveContent) : []
+      const body: Record<string, unknown> = { ok: true, version }
+      if (mismatch) body.owner_mismatch = ownerMismatchPayload(id, mismatch)
+      if (homoglyphs.length > 0) {
+        const warning = formatHomoglyphWarning(homoglyphs)
+        logger.warn({ memoryId: id, agent: agent_id }, `memory updated with ${warning}`)
+        body.homoglyph_warning = warning
+      }
+      json(res, body)
       return true
     }
     json(res, { error: 'Memory not found' }, 404)

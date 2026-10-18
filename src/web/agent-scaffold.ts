@@ -6,6 +6,7 @@ import { PROJECT_ROOT, OWNER_NAME, MAIN_AGENT_ID, HEARTBEAT_AGENT_ID, BOT_NAME, 
 import { channelStateDir } from '../channel-provider.js'
 import { runAgent } from '../agent.js'
 import { atomicWriteFileSync } from './atomic-write.js'
+import { writeClaudeMdKeepingBackup } from './persona-backup.js'
 import { findDuplicateJsonKeys } from './json-dup-keys.js'
 import { logger } from '../logger.js'
 import { filterInheritableMcpServers, readInheritableMcpServerNames, logNotInherited } from './mcp-inheritance.js'
@@ -166,8 +167,6 @@ export interface TemplateIdentity {
   botName: string
   ownerName: string
   webPort: number | string
-  /** IANA zone for {{TIMEZONE}}; the install zone (APP_TZ) when omitted. */
-  timeZone?: string
 }
 
 // Pure substitution of the identity placeholders into a template body. Kept in
@@ -183,8 +182,6 @@ export function substituteTemplatePlaceholders(content: string, id: TemplateIden
     .replaceAll('{{BOT_NAME}}', id.botName)
     .replaceAll('{{OWNER_NAME}}', id.ownerName)
     .replaceAll('{{WEB_PORT}}', String(id.webPort))
-    // ISSUE1895 (#1895): the install zone, not a hardcoded Europe/Budapest.
-    .replaceAll('{{TIMEZONE}}', id.timeZone ?? APP_TZ)
 }
 
 export function resolveTemplatePlaceholders(content: string): string {
@@ -1145,15 +1142,41 @@ export const FLEET_BASELINE_DENY = [
 // Existing entries are preserved and their order kept: an operator's own deny
 // rule must never be dropped by a migration. Returns true if anything changed.
 export function mergeBashEgressDeny(settings: Record<string, unknown>): boolean {
+  return mergeDenyRules(settings, BASH_EGRESS_DENY)
+}
+
+// The same idempotent, order-preserving merge for ANY list of rules, so the
+// worker sessions (agent-worker.ts) can take the egress list AND the floor
+// through one code path instead of a second copy. Pure: no I/O.
+export function mergeDenyRules(settings: Record<string, unknown>, rules: readonly string[]): boolean {
   const perms = (settings.permissions && typeof settings.permissions === 'object' && !Array.isArray(settings.permissions))
     ? settings.permissions as Record<string, unknown>
     : {}
   const deny = Array.isArray(perms.deny) ? [...(perms.deny as unknown[])] : []
-  const missing = BASH_EGRESS_DENY.filter((rule) => !deny.includes(rule))
+  const missing = rules.filter((rule) => !deny.includes(rule))
   if (missing.length === 0) return false
   perms.deny = [...deny, ...missing]
   settings.permissions = perms
   return true
+}
+
+// The deny rules a WORKER session carries (WORKERVAK925). The worker sessions
+// (hex-worker, hex-worker-fast) run `claude --dangerously-skip-permissions` on a
+// prompt built from a message's text, in a cwd and a CLAUDE_CONFIG_DIR OUTSIDE the
+// project, so none of the per-agent routes reaches them: no profile (they are
+// not agents), no repo .claude/settings.json (the cwd is not under it), and the
+// shared ~/.claude/settings.json is the owner's own file. Measured 2026-10-02:
+// 0 deny rules on both. A deny rule is honoured under --dangerously-skip-permissions
+// (a literal `git push --force` was refused in such a session on 2026-10-03), so
+// this list is a real, if narrow, gate.
+//
+// The content is the fleet's own two lists, not a worker-specific policy: the
+// egress rules every agent carries, and the floor. Measured against what a
+// worker actually does (3 weeks of transcripts, 31 Bash commands: heredoc
+// writes of its answer file, one sed, one ls), none of them is refused.
+export function workerDenyRules(home: string): string[] {
+  const ctx = { HOME: home, AGENT_DIR: home }
+  return [...BASH_EGRESS_DENY, ...FLEET_BASELINE_DENY.map((r) => resolveProfilePlaceholders(r, ctx))]
 }
 
 // WHICH FILE the egress deny is written to -- the part that is not obvious, so
@@ -1317,12 +1340,22 @@ export function injectEgressGate(existing: Record<string, unknown>): void {
     matcher: 'WebFetch',
     hooks: [{ type: 'command', command, timeout: 10 }],
   }
+  // PONDERTIER1003: the same script on the Playwright tools. It judges ONLY the research agent's
+  // session (identity from the transcript path) and allows every other caller untouched, so the
+  // entry is a no-op everywhere but there; see the header of egress-gate.mjs.
+  const browserEntry = {
+    matcher: PONDER_BROWSER_MATCHER,
+    hooks: [{ type: 'command', command, timeout: 10 }],
+  }
   const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
   hooks.PreToolUse = [
     ...prev.filter((e) => !JSON.stringify(e).includes('egress-gate.mjs')),
     entry,
+    browserEntry,
   ]
 }
+
+export const PONDER_BROWSER_MATCHER = 'mcp__playwright__.*'
 
 // Which agents get the Bash egress parser (EGRESSPARSER923): every sub-agent,
 // NOT the main agent -- the same population the BASH_EGRESS_DENY list binds on
@@ -1634,7 +1667,9 @@ export function ensureEgressGate(name: string): boolean {
   // entry (dead on nvm PATHs, exit 127 = silently non-enforcing) must NOT
   // count as wired -- fall through so injectEgressGate replaces it in place.
   const ptuJson = JSON.stringify(ptu)
-  if (ptuJson.includes('egress-gate.mjs') && hookCommandWired(ptuJson, command)) return false
+  const browserWired = ptu.some((e) => (e as { matcher?: unknown })?.matcher === PONDER_BROWSER_MATCHER
+    && hookCommandWired(JSON.stringify(e), command))
+  if (ptuJson.includes('egress-gate.mjs') && hookCommandWired(ptuJson, command) && browserWired) return false
   if (isUnsafeHookCommand(command)) return false
   injectEgressGate(settings)
   if (name !== MAIN_AGENT_ID) mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
@@ -2580,7 +2615,7 @@ export function ensureEvidenceSection(name: string): void {
   }
 
   if (updated === existing) return
-  atomicWriteFileSync(claudeMdPath, updated)
+  writeClaudeMdKeepingBackup(claudeMdPath, updated)
 }
 
 // Idempotently ensures the autonomy-wiring block is present and current in the
@@ -2613,7 +2648,7 @@ export function ensureMcpListChannelSection(name: string): void {
   }
 
   if (updated === existing) return
-  atomicWriteFileSync(claudeMdPath, updated)
+  writeClaudeMdKeepingBackup(claudeMdPath, updated)
 }
 
 // ---- Message close: notify:false for an incoming report (ACKONCLOSE927) ----
@@ -2677,7 +2712,7 @@ export function ensureMessageCloseSection(name: string): void {
     : existing.trimEnd() + '\n\n' + block + '\n'
 
   if (updated === existing) return
-  atomicWriteFileSync(claudeMdPath, updated)
+  writeClaudeMdKeepingBackup(claudeMdPath, updated)
 }
 
 // Idempotently ensures the autonomy-wiring block is present and current in the
@@ -2712,7 +2747,7 @@ export function ensureAutonomySection(name: string): void {
   }
 
   if (updated === existing) return
-  atomicWriteFileSync(claudeMdPath, updated)
+  writeClaudeMdKeepingBackup(claudeMdPath, updated)
 }
 
 // Idempotently ensures the fleet roster block is present and current in the
@@ -2750,7 +2785,7 @@ export function ensureFleetRosterSection(name: string): void {
   }
 
   if (updated === existing) return
-  atomicWriteFileSync(claudeMdPath, updated)
+  writeClaudeMdKeepingBackup(claudeMdPath, updated)
 }
 
 // HOSTMOVE923: the CLAUDE.md side of the same re-anchoring (see
@@ -2771,37 +2806,113 @@ export function ensureProjectRootInClaudeMd(name: string): boolean {
   }
   const r = rewriteForeignProjectRoot(existing, PROJECT_ROOT)
   if (r.replaced === 0) return false
-  atomicWriteFileSync(claudeMdPath, r.text)
+  writeClaudeMdKeepingBackup(claudeMdPath, r.text)
   logger.info({ agent: name, replaced: r.replaced, foreignRoots: r.foreignRoots, projectRoot: PROJECT_ROOT },
     'ensureProjectRootInClaudeMd: install-anchored paths re-anchored on the current PROJECT_ROOT')
   return true
 }
 
-// SKILLUTCSAPDA822: the near-identical `.claude-config/skills` path IS the
-// shared global directory (a symlink to ~/.claude/skills, single-copy
-// distribution -- deliberate, see skills-symlink-single-copy), and the
-// skill-run base directory even DISPLAYS that path. An agent writing "its
-// own" skill there writes to the whole fleet, and nothing says so. Measured
-// 2026-08-22: five third-party marketing skills landed in the shared dir and
-// only luck caught them. The symlink stays; the fix is naming the trap in
-// every agent's CLAUDE.md, idempotently, on every respawn.
+// SKILLUTCSAPDA822: the isolated config root's `skills` entry IS the shared
+// global directory (a symlink to ~/.claude/skills, single-copy distribution --
+// deliberate, see skills-symlink-single-copy), and the skill-run base directory
+// even DISPLAYS that path. An agent writing "its own" skill there writes to the
+// whole fleet, and nothing says so. Measured 2026-08-22: five third-party
+// marketing skills landed in the shared dir and only luck caught them. The
+// symlink stays; the fix is naming the trap in every agent's CLAUDE.md,
+// idempotently, on every respawn.
+//
+// SKILLGYOKERLATSZIK923: the body used to be ONE text for everybody, and it was
+// wrong for the main agent in the direction that matters. It said "your own,
+// private skill goes in your working directory's .claude/skills" -- true for a
+// sub-agent, whose cwd is agents/<name>, but the MAIN agent's cwd IS the project
+// root, and every sub-agent's cwd sits UNDER it. That directory is therefore
+// their ancestor: the main agent's "private" skills are visible to the whole
+// fleet. Measured 2026-09-23 -- the main agent told a sub-agent a new skill was
+// private, the sub-agent measured it and showed he was already reading it. So
+// the body is per-agent: the same three locations, described from the reader's
+// own position.
+//
+// Upstream review of #1563: the measurement above assumed an isolated root. On a DEFAULT install
+// (MAIN_AGENT_ISOLATED_CONFIG=0, the flag is tied to the fleet OAuth token) the main agent runs on the
+// shared ~/.claude, CLAUDE_CONFIG_DIR is empty, and `ls -ld "$CLAUDE_CONFIG_DIR/skills"` becomes
+// `ls -ld /skills`. So the body says what an empty variable means and the command falls back to
+// ~/.claude. The five-vantage-point measurement below was taken on an isolated install.
+// SKILLGYOKERNEV925: the body no longer NAMES the isolated config root either --
+// it asks the reader to MEASURE it (`echo "$CLAUDE_CONFIG_DIR"`). Measured
+// 2026-09-25 from five vantage points: EVERY agent has an isolated root whose
+// `skills` entry is a symlink to ~/.claude/skills (53 skills). Only the NAME
+// differs -- sub-agents get agents/<name>/.claude-config, the main agent gets
+// <PROJECT_ROOT>/.channels-config. Naming one path teaches a false
+// generalisation in both directions, and both were actually made: from "my
+// .claude-config does not exist" one agent concluded the install has none (false
+// for four agents out of five), and a body that calls `.claude-config` THE trap
+// invites the reverse -- that a differently named root is safe. The name is the
+// per-agent part; the symlink is the invariant, so the body pins the measurement,
+// not the name.
 const SKILLS_TRAP_BEGIN = '<!-- BEGIN GENERATED: skills-path-trap (auto-generated, do not edit by hand) -->'
 const SKILLS_TRAP_END = '<!-- END GENERATED: skills-path-trap -->'
 const SKILLS_TRAP_BLOCK_RE = new RegExp(
   `${SKILLS_TRAP_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${SKILLS_TRAP_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
 )
 
-function buildSkillsPathTrapBody(): string {
-  return [
+function buildSkillsPathTrapBody(name: string): string {
+  const isMain = name === MAIN_AGENT_ID
+  const shared = [
     '## Skill-útvonal csapda (KÖTELEZŐ elolvasni skill-írás előtt)',
     '',
-    'A `.claude-config/skills` NEM a saját mappád: symlink a globális',
-    '`~/.claude/skills`-re, tehát ami oda kerül, az a TELJES flottánál megjelenik',
-    '-- akkor is, ha a skill-futtatás base directory-ja ezt az utat mutatja.',
-    'A saját, csak neked szóló vagy kipróbálatlan külső skill a munkakönyvtárad',
-    '`.claude/skills/` mappájába megy. A globálisba írás tudatos, flotta-szintű',
-    'döntés legyen, ne alapértelmezés.',
+    'HÁROM hely van, nem kettő, és a különbség nem az, hogy melyik "globális",',
+    'hanem hogy KI LÁTJA. Mielőtt skillt írsz vagy mozgatsz, MÉRD MEG, melyik',
+    'config-gyökérből futsz:',
     '',
+    '```bash',
+    'echo "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; ls -ld "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills"',
+    '```',
+    '',
+    'Ha a `$CLAUDE_CONFIG_DIR` ÜRES (alapértelmezett telepítés, ahol a fő ágens',
+    'izolált config-gyökér nélkül, a megosztott `~/.claude`-on fut), a gyökered',
+    'maga a `~/.claude`, és annak `skills` mappája a globális: a lenti 1. pont,',
+    'symlink nélkül. Izolált módban a gyökér NEVE ágensenként MÁS (a sub-ágenseké',
+    '`agents/<név>/.claude-config`, a fő ágensé `<projekt-gyökér>/.channels-config`),',
+    'ezért a NÉVRE emlékezni félrevezet, mindkét irányban: abból, hogy egy út NÁLAD',
+    'nem létezik, semmi nem következik a flotta többi tagjára, és attól, hogy a',
+    'gyökeredet másképp hívják, még nem a tiéd, ami benne van. A viselkedés',
+    'mindenhol UGYANAZ, és pont ezt mutatja meg a fenti `ls -ld`: izolált',
+    'módban a `$CLAUDE_CONFIG_DIR/skills` SYMLINK a globálisra, tehát az 1. pont,',
+    'más néven; üres változónál maga a `~/.claude/skills` az.',
+    '',
+    '1. `~/.claude/skills` -- a globális. MINDEN ágens látja. Ide írni tudatos,',
+    '   flotta-szintű döntés legyen, ne alapértelmezés. A skill-futtatás base',
+    '   directory-ja a saját config-gyökeredet MUTATHATJA -- attól még a flottáé.',
+  ]
+  const perAgent = isMain
+    ? [
+        '2. A PROJEKT-GYÖKÉR `.claude/skills` mappája. **EZ NEKED NEM PRIVÁT.**',
+        '   A munkakönyvtárad MAGA a projekt gyökere, a sub-ágenseké pedig',
+        '   (`agents/<név>`) ezen BELÜL van, tehát ez a mappa az ŐSÜK: amit ide',
+        '   írsz, az megjelenik a listájukban. Láthatóságban úgy viselkedik,',
+        '   mint a globális.',
+        '3. `agents/<név>/.claude/skills` -- egy SUB-ÁGENS saját mappája. Csak övé.',
+        '   NEKED NINCS ilyen: az `agents/<sajat-neved>` mappa nem létezik, és egy',
+        '   ott létrehozott mappa a te munkakönyvtárad GYEREKE lenne, nem az őse,',
+        '   tehát te magad sem látnád.',
+        '',
+        'KÖVETKEZMÉNY: ezen a telepítésen NINCS olyan hely, ahova a fő ágens',
+        'csak-magának írhat skillt. Ne feltételezd, hogy privát -- 2026-09-23-án',
+        'ez a feltételezés dőlt meg, és nem magától: egy sub-ágens mérte meg.',
+      ]
+    : [
+        '2. A PROJEKT-GYÖKÉR `.claude/skills` mappája. A munkakönyvtárad EZEN BELÜL',
+        '   van, tehát ez a mappa az ŐSÖD: az itt álló skilleket LÁTOD, akkor is,',
+        '   ha nem te írtad és nem neked szólnak. Ide te NE írj: ez a fő ágens',
+        '   területe, és amit ide tennél, azt a többi ágens is látná.',
+        '3. A saját `.claude/skills` mappád a munkakönyvtáradban',
+        '   (`agents/<a-te-neved>/.claude/skills`). EZ az egyetlen, ami tényleg',
+        '   csak a tiéd. A saját, csak neked szóló vagy kipróbálatlan külső skill',
+        '   ide megy.',
+      ]
+  // The memory trap (a30553d) is upstream already and is not what SKILLGYOKERNEV925
+  // rewrites, so it stays, after the numbered places.
+  const memoryTrap = [
     // 2026-09-07: a leanarchivist a saját tanulságát a
     // `.claude-config/projects/-home-istvan-marveen/memory/MEMORY.md`-be akarta
     // írni. Megmérve: `projects -> ~/.claude/projects`, tehát az a fájl a Lean
@@ -2833,7 +2944,8 @@ function buildSkillsPathTrapBody(): string {
     'benne (saját stub git-repó vagy git nélküli telepítés). A saját, csak rád',
     'tartozó emlék helye ettől függetlenül a dashboard API (`POST /api/memories`,',
     '`agent_id`-vel).',
-  ].join('\n')
+  ]
+  return [...shared, ...perAgent, '', ...memoryTrap].join('\n')
 }
 
 // Same five-rule idempotency contract as ensureFleetRosterSection /
@@ -2845,7 +2957,7 @@ export function ensureSkillsPathTrapSection(name: string): void {
     : join(agentDir(name), 'CLAUDE.md')
   if (!existsSync(claudeMdPath)) return
 
-  const block = `${SKILLS_TRAP_BEGIN}\n${buildSkillsPathTrapBody()}\n${SKILLS_TRAP_END}`
+  const block = `${SKILLS_TRAP_BEGIN}\n${buildSkillsPathTrapBody(name)}\n${SKILLS_TRAP_END}`
 
   let existing: string
   try {
@@ -2862,7 +2974,7 @@ export function ensureSkillsPathTrapSection(name: string): void {
   }
 
   if (updated === existing) return
-  atomicWriteFileSync(claudeMdPath, updated)
+  writeClaudeMdKeepingBackup(claudeMdPath, updated)
 }
 
 // GUARDHITELES903: the RECEIVER half of the authenticated system-directive
@@ -2933,7 +3045,7 @@ export function ensureSystemDirectiveAuthSection(name: string): void {
   }
 
   if (updated === existing) return
-  atomicWriteFileSync(claudeMdPath, updated)
+  writeClaudeMdKeepingBackup(claudeMdPath, updated)
 }
 
 // X-Agent-Id fejléc a memória-hívásokhoz (kártya 29c8cf33, A) opció).
@@ -3000,7 +3112,7 @@ export function ensureAgentIdHeaderSection(name: string): void {
     : existing.trimEnd() + '\n\n' + block + '\n'
 
   if (updated === existing) return
-  atomicWriteFileSync(claudeMdPath, updated)
+  writeClaudeMdKeepingBackup(claudeMdPath, updated)
 }
 
 // THIN CHIEF handoff standard. István döntése 2026-09-07, a specialisták
@@ -3270,7 +3382,7 @@ export function ensureThinChiefHandoffSection(name: string): void {
   }
 
   if (updated === existing) return
-  atomicWriteFileSync(claudeMdPath, updated)
+  writeClaudeMdKeepingBackup(claudeMdPath, updated)
 }
 
 // MEMKERESVAK917: the BACK-FILL half of #1380. That PR fixed the two GENERATING
@@ -3360,7 +3472,7 @@ export function ensureMemorySearchLabelSection(name: string): void {
     : existing.trimEnd() + '\n\n' + block + '\n'
 
   if (updated === existing) return
-  atomicWriteFileSync(claudeMdPath, updated)
+  writeClaudeMdKeepingBackup(claudeMdPath, updated)
 }
 
 // AUTHSECT919: the fleet auth rule existed only as hand-written prose in the
@@ -3458,7 +3570,7 @@ export function ensureFleetAuthSection(name: string): void {
     : existing.trimEnd() + '\n\n' + block + '\n'
 
   if (updated === existing) return
-  atomicWriteFileSync(claudeMdPath, updated)
+  writeClaudeMdKeepingBackup(claudeMdPath, updated)
 }
 
 export async function generateClaudeMd(name: string, description: string, model: string): Promise<string> {

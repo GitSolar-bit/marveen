@@ -34,6 +34,7 @@ piece stays correct per-agent even with different bots.
 |-------|---------|-----|
 | `telegram_progress.py` | `UserPromptSubmit` hook | If the prompt contains a Telegram `<channel … chat_id … message_id>` block, post the placeholder and record its message id in a per-session state file. |
 | `telegram_progress_reply_clear.py` | `PostToolUse` hook (matcher `telegram.*reply`) | Delete the placeholder(s) for the replied chat the instant a reply is sent. **Primary clear path.** |
+| `telegram_progress_reply_clear.py` (second entry) | `PostToolUse` hook (matcher `telegram.*react`) | Same script. A reaction on an inbound that `telegram_progress.py` recorded as a pure acknowledgement (`"ack": true`, predicate in `telegram_ack_lib.py`) counts as the answer and removes the placeholder. A reaction on a question or decision does not. |
 | `telegram_progress_clear.py` | `Stop` hook | Delete any placeholder still recorded at turn end, **and enforce delivery** (see below). |
 | `telegram_progress_watchdog.py` | launchd / systemd, ~60s | Scan every agent's per-agent state dir; for an orphan (the agent's `agent-<name>` tmux session is gone + older than a short grace, OR older than a generous "wedged" threshold) rewrite the placeholder via `editMessageText` into the error text. The only layer that can speak when the agent itself is down. |
 

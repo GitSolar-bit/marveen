@@ -434,6 +434,56 @@ describe('getDispatchedPendingStats -- self-addressed messages', () => {
 // this agent, so finishing work used to block the gate for the whole stale
 // cutoff -- and a busy agent renewed the block with every close. A result report
 // is the end of a delegation, never outstanding work.
+// Card 5e4110d7 (HEX 3570, direction A): a message the sender marked 'info' is not work in flight; an UNMARKED one
+// still is, exactly as before. The restart gate counted every unfinished conversational message (measured 2026-10-13:
+// 6 delivered, never-closed messages from the main agent in two hours), because nothing says "no reply needed".
+describe('getDispatchedPendingStats -- kind: info (5e4110d7)', () => {
+  const TWO_HOURS = 2 * 60 * 60 * 1000
+
+  it('an info message to another agent is not counted', () => {
+    createAgentMessage('kind-a', 'kind-b', 'FYI, nincs teendo', null, null, { kind: 'info' })
+    const s = getDispatchedPendingStats('kind-a', Date.now(), TWO_HOURS)
+    expect(s.count).toBe(0)
+    expect(s.hasStale).toBe(false)
+  })
+
+  it('NEGATIVE CONTROLS: a task, and an UNMARKED message, are counted as before', () => {
+    createAgentMessage('kind-c', 'kind-d', 'feladat', null, null, { kind: 'task' })
+    createAgentMessage('kind-c', 'kind-d', 'jelolet nelkul')
+    expect(getDispatchedPendingStats('kind-c', Date.now(), TWO_HOURS).count).toBe(2)
+  })
+
+  it('an info message does not mask a task next to it, and a task does not make an info count', () => {
+    createAgentMessage('kind-e', 'kind-f', 'info', null, null, { kind: 'info' })
+    createAgentMessage('kind-e', 'kind-f', 'feladat')
+    createAgentMessage('kind-e', 'kind-f', 'info 2', null, null, { kind: 'info' })
+    expect(getDispatchedPendingStats('kind-e', Date.now(), TWO_HOURS).count).toBe(1)
+  })
+
+  it('the same holds for the main agent as sender (the case the card is about), delivered or pending', () => {
+    const m = createAgentMessage('kind-main', 'kind-g', 'tajekoztato', null, null, { kind: 'info' })
+    getDb().prepare("UPDATE agent_messages SET status = 'delivered', delivered_at = ? WHERE id = ?").run(Math.floor(Date.now() / 1000), m.id)
+    createAgentMessage('kind-main', 'kind-g', 'feladat')
+    expect(getDispatchedPendingStats('kind-main', Date.now(), TWO_HOURS, 'kind-main').count).toBe(1)
+  })
+
+  it('an old info message is not stale either', () => {
+    const m = createAgentMessage('kind-h', 'kind-i', 'regi info', null, null, { kind: 'info' })
+    getDb().prepare('UPDATE agent_messages SET created_at = ? WHERE id = ?').run(Math.floor(Date.now() / 1000) - 5 * 3600, m.id)
+    const s = getDispatchedPendingStats('kind-h', Date.now(), TWO_HOURS)
+    expect(s.hasStale).toBe(false)
+    expect(s.count).toBe(0)
+  })
+
+  it('the kind is stored: info is info, everything else (a typo included) is a task, and the row says so', () => {
+    expect(createAgentMessage('kind-j', 'kind-k', 'x', null, null, { kind: 'info' }).kind).toBe('info')
+    expect(createAgentMessage('kind-j', 'kind-k', 'x').kind).toBe('task')
+    expect(createAgentMessage('kind-j', 'kind-k', 'x', null, null, { kind: 'Info' as never }).kind).toBe('task')
+    const stored = getDb().prepare("SELECT kind FROM agent_messages WHERE from_agent = 'kind-j' ORDER BY id").all() as { kind: string }[]
+    expect(stored.map((r) => r.kind)).toEqual(['info', 'task', 'task'])
+  })
+})
+
 describe('getDispatchedPendingStats -- result notifications', () => {
   const NOW = 2_000_000_000_000  // ms
   const TWO_HOURS = 2 * 60 * 60 * 1000

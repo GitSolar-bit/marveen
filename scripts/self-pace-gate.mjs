@@ -27,7 +27,8 @@
 // writeAgentSettingsFromProfile() (agent-scaffold.ts), guarded by
 // name !== MAIN_AGENT_ID, re-applied on every spawn (respawn-safe).
 
-import { readFileSync, realpathSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { readFileSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -510,6 +511,401 @@ export function normalizeShellEvasion(seg) {
     .replace(/\\(.)/g, '$1') // \X -> X (bash unescape of a backslash-escaped char)
 }
 
+// THE tmux WRITE PRIMITIVE, BY INVERTED PROOF (card 9f57f705, the owner's rule 11: loud by default,
+// silent only on provably clean, never a list of shapes).
+//
+// SELF_PACE_BASH_PATTERNS[0] needs the literal word `tmux` AND one of four literal subcommand names in
+// ONE segment. Measured offline on the live gate (probe.mjs, nothing executed): 20 of 32 cases got through, and
+// most of them are not interpreters -- tmux's own aliases (`send`, `pasteb`, `run`, `send-prefix`,
+// `source-file`, `if-shell`, `respawn-pane`), the command or the subcommand in a shell variable, an `env` /
+// `xargs` / `-S socket` prefix, a python list split over two lines, and a script FILE whose content nobody
+// reads. Adding those names would be the shape list again; the next alias gets through.
+//
+// So the question is turned round. For a sub-agent the word `tmux` may appear in a Bash command only as
+//   (a) the command word with a READ subcommand (list-*, has-session, display-message, capture-pane,
+//       show-*, info), no `#(shell)` format expansion, no chained second tmux command, and none of tmux's
+//       own -c (runs a shell command), -C (reads commands from stdin) or -f (loads a config that runs commands); or
+//   (b) an argument of a plain reader (grep, cat, ls, jq, echo, pgrep, which ...) in a command that has no
+//       executing sink (a pipe into a shell/interpreter, xargs, eval, source, a command substitution that says tmux).
+// Every other mention -- a variable, an interpreter body, a wrapper, a write subcommand -- is a deny. Quotes
+// are dropped before the word is looked for, because bash joins tm''ux and "tm"ux into one word.
+//
+// A SCRIPT an interpreter runs is read the same way (see interpreterRunVerdict): the gate reads the file, or the
+// text the SAME command writes to it (`cat > F <<'EOF' ... EOF; python3 F`), and the file may mention tmux only in
+// the two forms above.
+//
+// WHAT THIS DOES NOT CLOSE, said here and not hidden: a name that is never spelled `tmux` once the shell has
+// joined the quotes and escapes (built at run time, 'tm'+'ux' inside a python string, a decoded string), a script
+// that runs another script, a wrapper this gate does not know (WRAPPERS below), `python3 -m pytest x.py` and
+// the like (a module runner that imports a file), a binary run by a computed direct path, a file written by an
+// EARLIER command and replaced before it runs, and a binary that drives tmux without the word in its own command line.
+// The gate's own header says a sub-agent is not adversarial to its gate: this closes the CASUAL routes.
+const SHELL_KEYWORDS = new Set(['do', 'then', 'else', 'elif', 'if', 'while', 'until', '!', '{', '('])
+const TMUX_WORD_RX = /(?<![\w.$-])(?<!\$\{)tmux(?![\w*/-]|\.\w)/i
+const TMUX_READ_SUBCOMMANDS = new Set([
+  'list-sessions', 'ls', 'list-windows', 'lsw', 'list-panes', 'lsp', 'list-clients', 'lsc', 'list-buffers', 'lsb',
+  'list-commands', 'lscm', 'list-keys', 'lsk', 'has-session', 'has', 'display-message', 'display', 'capture-pane',
+  'capturep', 'show-options', 'show', 'show-window-options', 'showw', 'show-environment', 'showenv',
+  'show-messages', 'showmsgs', 'show-hooks', 'show-buffer', 'showb', 'server-info', 'info',
+])
+const TMUX_OPTS_WITH_VALUE = new Set(['-L', '-S', '-T'])
+// -c runs a shell command, -C reads tmux commands from stdin, -f loads a config file that runs commands (man tmux)
+const TMUX_UNSAFE_OPT_RX = /^-[A-Za-z0-9]*[cCf]/
+const TMUX_PASS_THROUGH = new Set(['sudo', 'command', 'exec', 'nice', 'time', 'builtin', 'nohup'])
+const TMUX_READERS = new Set([...ALLOWLIST_READERS, 'pgrep', 'which', 'whereis', 'type'])
+// something that EXECUTES what it is fed, for the reader exemption (b): a pipe into a shell / interpreter, eval / source /
+// xargs / `. file` in command position, or a command substitution that itself contains the word. (An unrelated
+// `$(...)` elsewhere in the command is not a sink for a tmux word that sits in an `echo` -- measured on the replay.)
+const TMUX_SINK_RX = /\|\s*(?:\S*\/)?(?:sh|bash|zsh|dash|ksh|python[0-9.]*|node|nodejs|ruby|perl|php)\b|(?:^|[;&|\n(`]|\$\()\s*(?:eval|source|xargs)\b|\$\([^)]*\btmux|`[^`]*\btmux|(?:^|[;&|\n])\s*\.\s/i
+// tmux chains commands with an escaped (or quoted) semicolon; the part after it is a second command
+const TMUX_CHAIN_RX = /\btmux\b[^\n]*(?:\\;|(['"]);\1)/i
+const SCRIPT_SCAN_MAX_BYTES = 4 * 1024 * 1024
+
+const stripQuoteChars = (t) => String(t ?? '').replace(/['"]/g, '')
+
+// `tail` is what follows the word `tmux`; `whole` is the segment.
+function tmuxCallIsRead(tail, whole) {
+  if (/#\(/.test(whole)) return false // a format expansion runs a shell command
+  const words = String(tail).replace(/[)`;]+$/, '').trim().split(/\s+/).filter(Boolean)
+  let j = 0
+  while (j < words.length && words[j].startsWith('-')) {
+    if (TMUX_OPTS_WITH_VALUE.has(words[j])) { j += 2; continue }
+    if (TMUX_UNSAFE_OPT_RX.test(words[j])) return false
+    j++
+  }
+  const sub = (words[j] ?? '').replace(/[)`;]+$/, '')
+  return TMUX_READ_SUBCOMMANDS.has(sub)
+}
+
+function tmuxSegmentAllowed(seg, hasSink) {
+  const s = stripQuoteChars(normalizeShellEvasion(seg)).trim()
+  if (!TMUX_WORD_RX.test(s)) return true
+  const re = new RegExp(TMUX_WORD_RX.source, 'gi')
+  for (const m of s.matchAll(re)) {
+    const before = s.slice(0, m.index).replace(/\$\(|`|\(|\{|\)/g, ' ').trim()
+    const toks = before ? before.split(/\s+/) : []
+    const rest = toks.filter((t) => !/^[A-Za-z_][A-Za-z0-9_]*=\S*$/.test(t) && !SHELL_KEYWORDS.has(t) && !TMUX_PASS_THROUGH.has(t) && t !== 'env')
+    if (rest.length === 0) { // command position
+      if (!tmuxCallIsRead(s.slice(m.index + m[0].length), s)) return false
+      continue
+    }
+    // argument position: only a plain reader's argument, in a command with no executing sink
+    const cmd = rest[0].replace(/^.*\//, '').toLowerCase()
+    const isTypeProbe = toks.length === 2 && toks[0] === 'command' && /^-[vV]$/.test(toks[1]) // `command -v tmux`
+    if (hasSink || !(TMUX_READERS.has(cmd) || isTypeProbe)) return false
+  }
+  return true
+}
+
+export function tmuxMentionAllowed(command) {
+  const raw = String(command ?? '')
+  if (!TMUX_WORD_RX.test(stripQuoteChars(normalizeShellEvasion(raw)))) return true
+  if (TMUX_CHAIN_RX.test(raw)) return false
+  const hasSink = TMUX_SINK_RX.test(stripQuoteChars(raw))
+  return splitSegments(raw).every((seg) => tmuxSegmentAllowed(seg, hasSink))
+}
+
+// WHAT SCRIPT DOES AN INTERPRETER RUN? (owner's decision, rule 11: "cannot be proven = deny").
+// The gate can only judge what it can read. An interpreter (python / node / bash / ...) that runs a script FILE is
+// therefore allowed only when the gate can name and read that file, or the text the same command writes to it:
+//   - a literal path (`python3 /abs/x.py`, `bash ./x.sh`), or a `$NAME` / `${NAME}` that the SAME command set to a literal
+//     earlier (`S=/abs/dir; python3 $S/x.py`), with `cd <literal>` followed for a relative path; and
+//   - the file is readable, not a directory, not bigger than SCRIPT_SCAN_MAX_BYTES, and its code lines mention tmux only
+//     in the two provable forms (tmuxMentionAllowed). Comments are skipped per LANGUAGE: `#` for shell / python / ruby /
+//     perl / php, `//` and a one-line `/* */` for node / ts (a `#x` in JS is a class field, a `*)` in bash is a case arm).
+// Anything else is a deny with reason 'script-path': a computed path ($VAR from the environment or from a loop, a glob,
+// a substitution), a path that cannot be read (missing file, directory, too large), or a relative path after a `cd` the
+// gate cannot follow. Inline code is not a file and is read as text: `-c`, `-e`, `-m`, a heredoc, `bash -c '...'`.
+// The interpreter may sit behind WRAPPERS (env, timeout, stdbuf, nice, sudo, npx, uv run ...) and `source F` / `. F` is
+// a shell run of F. The price is in the replay numbers of the commit; the way out is always the same: give the path
+// literally (or set it in the same command).
+const WRAPPERS = new Set([
+  'env', 'timeout', 'stdbuf', 'nice', 'ionice', 'nohup', 'sudo', 'time', 'command', 'exec', 'setsid', 'taskset', 'chrt',
+  'unbuffer', 'xvfb-run', 'npx', 'uv', 'uvx', 'pipx', 'builtin',
+])
+const WRAPPER_VALUE_FLAGS = new Set(['-n', '-u', '-g', '-c', '-k', '-s', '-p', '-C', '-D', '-R', '-t'])
+const INTERPRETER_VALUE_OPTS = {
+  python: new Set(['-W', '-X', '-Q']),
+  node: new Set(['-r', '--require', '--import', '--loader', '--conditions', '-C', '--input-type']),
+  perl: new Set(['-I', '-M', '-m']),
+  ruby: new Set(['-I', '-r']),
+  php: new Set(['-c', '-d']),
+  shell: new Set(['-o', '-O', '+o', '+O', '--rcfile', '--init-file']),
+}
+const INTERPRETER_INLINE_OPTS = {
+  python: new Set(['-c']), // -m is handled below: runpy and friends take a script file
+  node: new Set(['-e', '-p', '--eval', '--print']),
+  perl: new Set(['-e', '-E']),
+  ruby: new Set(['-e']),
+  php: new Set(['-r']),
+  shell: new Set(['-c']),
+}
+const MODULE_RUNNERS_OF_A_FILE = new Set(['runpy', 'cProfile', 'profile', 'pdb', 'trace'])
+const EXT_FAMILY = { py: 'python', js: 'node', mjs: 'node', cjs: 'node', ts: 'node', mts: 'node', sh: 'shell', bash: 'shell', rb: 'ruby', pl: 'perl', php: 'php' }
+function interpreterFamily(base) {
+  if (/^python[0-9.]*$/.test(base)) return 'python'
+  if (/^(?:node|nodejs|tsx|ts-node)$/.test(base)) return 'node'
+  if (base === 'perl') return 'perl'
+  if (base === 'ruby') return 'ruby'
+  if (base === 'php') return 'php'
+  if (/^(?:bash|sh|zsh|dash|ksh)$/.test(base)) return 'shell'
+  if (base === 'source' || base === '.') return 'shell'
+  return null
+}
+function familyFromShebang(text) {
+  const m = /^#!\s*(?:\/usr\/bin\/env\s+)?(\S+)/.exec(text)
+  return m ? interpreterFamily(m[1].replace(/^.*\//, '').toLowerCase()) : null
+}
+const COMPUTED_RX = /[$`*?[\]{}()~;&|<>]/
+// `command -v NAME...` / `command -V NAME...` (optionally `-p`) only prints how a name resolves: no program is run, and the
+// names after it are not scripts. A bare `command node x.js` still runs node and is judged as before.
+const COMMAND_TYPE_PROBE_RX = /^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:builtin\s+)?command\s+(?:-p\s+)?-[vV]\s/
+
+// Index of the command word: past shell keywords, VAR= assignments and wrappers (with their options and values).
+function commandWordIndex(words) {
+  let i = 0
+  for (;;) {
+    while (i < words.length && (SHELL_KEYWORDS.has(words[i]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i]))) i++
+    if (i >= words.length) return -1
+    const base = words[i].replace(/^.*\//, '').toLowerCase()
+    if (!WRAPPERS.has(base)) return i
+    i++
+    while (i < words.length) {
+      const w = words[i]
+      if (w.startsWith('-')) { i += WRAPPER_VALUE_FLAGS.has(w) ? 2 : 1; continue }
+      if (/^\d+(?:\.\d+)?[smhd]?$/.test(w) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) { i++; continue }
+      break
+    }
+    if ((base === 'uv' || base === 'uvx' || base === 'pipx') && words[i] === 'run') i++
+  }
+}
+
+// `NAME=value` / `export NAME=value` at the start of a segment: the literal value, or null when it is computed.
+function literalAssignment(words) {
+  let k = 0
+  if (words[0] === 'export' || words[0] === 'declare' || words[0] === 'local' || words[0] === 'readonly') k = 1
+  const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(words[k] ?? '')
+  if (!m) return null
+  const raw = m[2].replace(/^(['"])(.*)\1$/, '$2')
+  return { name: m[1], value: COMPUTED_RX.test(raw) ? null : raw }
+}
+
+function substituteKnown(target, vars) {
+  let ok = true
+  const out = target.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (_m, a, b) => {
+    const v = vars.get(a ?? b)
+    if (typeof v !== 'string') { ok = false; return _m }
+    return v
+  })
+  return ok ? out : null
+}
+
+// Files the command WRITES ITSELF, so that `cat > F <<'EOF' ... EOF; python3 F` is judged on the text it writes, not on a
+// file that does not exist yet when the hook runs: `cat > F <<EOF`, `cat <<EOF > F`, `tee F <<EOF`, `echo '..' > F`,
+// `printf '..' > F`. Returns [{ target, content }] with the target as written (not yet resolved).
+function writtenFiles(raw) {
+  const out = []
+  const heredoc = /(?:^|[;&|\n]\s*)(?:cat|tee)\b([^\n]*?)<<-?\s*(['"]?)([A-Za-z_]\w*)\2([^\n]*)\n([\s\S]*?)\n[ \t]*\3[ \t]*(?=\n|$)/g
+  for (const m of raw.matchAll(heredoc)) {
+    const line = m[0].split('\n')[0] // the command word, its arguments and the redirect, up to the end of the line
+    const t = /(?<![0-9&])>>?\s*(["']?)([^\s"'<>|;&]+)\1/.exec(line) ?? /\btee\s+(?:-a\s+)?(["']?)([^\s"'<>|;&]+)\1/.exec(line)
+    if (t) out.push({ target: t[2], content: m[5] })
+  }
+  const echo = /(?:^|[;&|\n]\s*)(?:echo|printf)\b([^\n]*?)(?<![0-9&])>>?\s*(["']?)([^\s"'<>|;&]+)\2\s*(?=$|[;&|\n])/g
+  for (const m of raw.matchAll(echo)) out.push({ target: m[3], content: stripQuoteChars(m[1]).replace(/\\n/g, '\n') }) // printf / echo -e: a \n is a line break
+  return out
+}
+
+function codeLines(text, fam) {
+  const keep = []
+  for (const l of text.split(/\r?\n/)) {
+    const t = l.trimStart()
+    if (fam === 'node' ? (t.startsWith('//') || /^\/\*.*\*\/\s*$/.test(t)) : t.startsWith('#')) continue
+    keep.push(l)
+  }
+  return keep.join('\n')
+}
+
+// The repo this gate was installed from. The waiver below is bound to it (HEX 3999, widened by HEX 4015): a file in any OTHER
+// git repo proves nothing about itself.
+const INSTALL_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+
+function gitIn(dir, ...args) {
+  const r = spawnSync('git', ['-C', dir, '-c', 'core.fsmonitor=false', ...args], { encoding: 'utf8', timeout: 3000 })
+  return r.status === 0 ? String(r.stdout).trim() : null
+}
+
+// Is `abs` a file of the install's repo: its main checkout or a LINKED WORKTREE of it (the same git common dir)? A review
+// worktree must be able to run the suites it reviews (HEX 4015).
+function inInstallRepo(abs, installRoot = INSTALL_ROOT) {
+  try {
+    const mine = gitIn(dirname(abs), 'rev-parse', '--path-format=absolute', '--git-common-dir')
+    const theirs = gitIn(installRoot, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+    return !!mine && !!theirs && realpathSync(mine) === realpathSync(theirs)
+  } catch {
+    return false
+  }
+}
+
+// A file of the install repo (main checkout or linked worktree) that is byte-identical to the blob committed in the HEAD of
+// the work tree it sits in is code that went through the history: the fleet's own daemon and hook scripts (channels.sh,
+// watchdog.sh, scripts/hooks/destructive-gate.py ...) say tmux send in earnest, and reviewers replay the hooks and run the
+// suites in their worktrees. Only the tmux scan is waived for such a file; an untracked, edited, or foreign-repo file (the
+// agent's own driver) is still scanned. NAMED LIMIT (measured 2026-10-14): the agent can commit a driver in its OWN linked
+// worktree (the prod-tree-guard covers only the main checkout), and the main checkout's HEAD can be moved without a hook (a
+// worktree branch fast-forwarded in); then the HEAD blob is the driver. Card deecccda closes only the second route; the first
+// is a standing limit (a commit in a worktree is ordinary work), unless the owner widens that card. Not this gate's job.
+// Cost: two git calls, only for a script that mentions tmux.
+function committedAndClean(abs, installRoot = INSTALL_ROOT) {
+  if (!inInstallRepo(abs, installRoot)) return false
+  const dir = dirname(abs)
+  const here = gitIn(dir, 'hash-object', '--', abs)
+  const there = gitIn(dir, 'rev-parse', '--verify', '-q', `HEAD:./${basename(abs)}`)
+  return !!here && here === there
+}
+
+// A shell that is given a script FILE (`bash agent-msg.sh sam hex - <<'EOF'`) does not read its heredoc as commands: the body is
+// the script's stdin, here a message text. The shell reads the body as code only when it reads its program from stdin: no
+// positional word, or `-s`, `-` (and `-c` takes its program from the argument, the body is that program's stdin, kept as text).
+// `words[at]` is the shell word.
+function shellRunsAScriptFile(words, at) {
+  for (let k = at + 1; k < words.length; k++) {
+    const w = words[k]
+    if (w === '-' || w === '--' || w.startsWith('<') || w.startsWith('>')) return false
+    if (w.startsWith('-') && !w.startsWith('--') && /[sc]/.test(w.slice(1))) return false // -s, -c, or a cluster with one
+    if (INTERPRETER_VALUE_OPTS.shell.has(w)) { k++; continue }
+    if (w.startsWith('-') || w.startsWith('+')) continue
+    return true
+  }
+  return false
+}
+
+// The body of a python / node / ruby / perl / php heredoc is that language's code, not shell lines: a line of it that begins
+// with `node = ...` or `bash is ...` (prose) must not be read as an interpreter run. (A shell heredoc, `bash <<EOF`, stays:
+// its lines ARE commands. The tmux text rule reads every body, whatever the language.)
+function blankNonShellHeredocBodies(command) {
+  const cmd = String(command ?? '')
+  if (!/<<-?\s*['"]?[A-Za-z_]/.test(cmd)) return cmd
+  return cmd.replace(/(<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2)([\s\S]*?)(^\s*\3\s*$)/gm, (full, open, _q, _m, _body, close, offset, whole) => {
+    const seg = whole.slice(0, offset).split(/\n|;|\|\|?|&&?|\(|\{/).pop() ?? ''
+    const words = seg.trim().split(/\s+/).filter(Boolean)
+    const at = commandWordIndex(words)
+    const fam = at < 0 ? null : interpreterFamily(words[at].replace(/^.*\//, '').toLowerCase())
+    if (fam === 'shell' && shellRunsAScriptFile(words, at)) return `${open}\n${close}` // the body is that script's stdin, not code
+    return fam && fam !== 'shell' ? `${open}\n${close}` : full
+  })
+}
+
+// Returns null (nothing to say) or { deny: true, reason }. `rawCommand` is the command BEFORE heredoc bodies were blanked.
+export function interpreterRunVerdict(command, cwd, rawCommand = command, installRoot = INSTALL_ROOT) {
+  const vars = new Map()
+  const writes = writtenFiles(String(rawCommand ?? ''))
+  let cur = cwd || process.cwd() // null once a `cd` the gate cannot follow has happened
+  for (const seg of splitSegments(blankNonShellHeredocBodies(command))) {
+    const words = normalizeShellEvasion(seg).trim().split(/\s+/).filter(Boolean)
+    if (!words.length) continue
+    const asg = literalAssignment(words)
+    if (asg) { vars.set(asg.name, asg.value); if (words.length === 1 || words[0] === 'export') continue }
+    if (words[0] === 'cd' || words[0] === 'pushd') {
+      const sub = words[1] ? substituteKnown(words[1].replace(/^['"]|['"]$/g, ''), vars) : null
+      const arg = sub ? expandHome(sub) : null // `~/x` is a known path once the home is expanded
+      cur = arg && !COMPUTED_RX.test(arg) && arg !== '-' ? resolve(cur || '/', arg) : null
+      continue
+    }
+    // `command -v node pytest` names programs, it runs none (not when a substitution or redirect rides along: that may run one)
+    if (COMMAND_TYPE_PROBE_RX.test(words.join(' ')) && !/[$`()<>]/.test(words.join(' '))) continue
+    const i = commandWordIndex(words)
+    if (i < 0) continue
+    const first = words[i]
+    const base = first.replace(/^.*\//, '').toLowerCase()
+    let fam = interpreterFamily(base)
+    let target = null
+    if (fam) {
+      const valueOpts = INTERPRETER_VALUE_OPTS[fam]
+      const inlineOpts = INTERPRETER_INLINE_OPTS[fam]
+      if (base === 'source' || base === '.') {
+        target = words[i + 1] ?? null
+      } else {
+        for (let k = i + 1; k < words.length; k++) {
+          const w = words[k]
+          if (w === '-' || w.startsWith('<') || w.startsWith('>')) { target = null; break } // stdin / heredoc: read as text
+          if (fam === 'shell' && /^-[A-Za-z]*s[A-Za-z]*$/.test(w)) { target = null; break } // `sh -s arg`: the program is stdin, `arg` is its $1
+          if (fam === 'python' && w === '-m') { // a module runner of a file takes it as the next positional, anything else is inline
+            if (MODULE_RUNNERS_OF_A_FILE.has(words[k + 1] ?? '')) { target = words[k + 2] ?? null }
+            break
+          }
+          if (fam === 'php' && w === '-f') { target = words[k + 1] ?? null; break }
+          if (inlineOpts.has(w) || (w.length > 2 && w.startsWith('-') && inlineOpts.has(w.slice(0, 2)) && fam !== 'shell')) { target = null; break }
+          if (valueOpts.has(w)) { k++; continue }
+          if (w.startsWith('-') || w.startsWith('+')) continue
+          target = w
+          break
+        }
+      }
+      if (target == null) continue // no file argument: interactive, stdin or inline code
+      if (/^[=(]/.test(target)) continue // `node = Node()`, `sh (x)`: not a command line
+    } else if (EXT_FAMILY[(/\.([A-Za-z0-9]+)$/.exec(first.replace(/[)`]+$/, ''))?.[1] ?? '').toLowerCase()] && !first.startsWith('-')) {
+      target = first // `uv run drv.py`, `pipx run drv.py`: a script by extension behind a wrapper this gate does not know
+      fam = EXT_FAMILY[/\.([A-Za-z0-9]+)$/.exec(first.replace(/[)`]+$/, ''))[1].toLowerCase()]
+    } else if (first.includes('/') && !first.startsWith('-')) {
+      target = first // a path run directly
+    } else {
+      continue
+    }
+    // the word may carry the closing of a substitution or a quote: `$(... | node x.mjs)`
+    target = target.replace(/[)`]+$/, '').replace(/^(['"])(.*)\1$/, '$2')
+    const subbed = substituteKnown(target, vars)
+    const resolved = subbed == null ? null : expandHome(subbed)
+    // A path run DIRECTLY (not through an interpreter) is judged only when the gate can read it: a computed path or a
+    // binary is not a deny (named limit; most direct paths are binaries such as /usr/bin/git).
+    const direct = !interpreterFamily(base) && !EXT_FAMILY[(/\.([A-Za-z0-9]+)$/.exec(first)?.[1] ?? '').toLowerCase()]
+    if (resolved == null || COMPUTED_RX.test(resolved)) {
+      if (direct) continue
+      return { deny: true, reason: 'script-path', detail: 'computed' }
+    }
+    const abs = resolve(cur ?? '/', resolved)
+    if (cur == null && !resolved.startsWith('/')) {
+      if (direct) continue
+      return { deny: true, reason: 'script-path', detail: 'cd' }
+    }
+    // the text this very command writes to the file wins over (and is judged besides) what is on disk
+    const texts = []
+    let fromDisk = -1 // index of the on-disk text in `texts`, -1 when there is none
+    for (const w of writes) {
+      const ws = substituteKnown(w.target, vars)
+      if (ws == null) continue
+      const wp = expandHome(ws)
+      if (!COMPUTED_RX.test(wp) && resolve(cur ?? '/', wp) === abs) texts.push(w.content)
+    }
+    try {
+      const st = statSync(abs)
+      if (!st.isFile() || st.size > SCRIPT_SCAN_MAX_BYTES) {
+        if (!texts.length) { if (direct) continue; return { deny: true, reason: 'script-path', detail: 'unreadable' } }
+      } else {
+        texts.push(readFileSync(abs, 'latin1'))
+        fromDisk = texts.length - 1
+      }
+    } catch {
+      if (!texts.length) { if (direct) continue; return { deny: true, reason: 'script-path', detail: 'unreadable' } }
+    }
+    // There is NO exemption for test files (round 5, Sam's K13). The round-3 one (`<dir>/__tests__/<name>.test.<ext>`) was
+    // narrowed to the install checkout's tracked files in round 4 and then did nothing the HEAD-blob waiver below does not
+    // already do, except let an EDITED or merely `git add`-ed test through. A test file that mentions tmux is judged like any
+    // script: byte-identical to the install checkout's HEAD blob, or scanned.
+    for (const text of texts) {
+      const f = fam ?? familyFromShebang(text)
+      if (direct && !fam && !f) continue // a binary run by a literal path: not a script the gate can read
+      const code = codeLines(text, f)
+      if (TMUX_WORD_RX.test(stripQuoteChars(code)) && !tmuxMentionAllowed(code)) {
+        // the committed-and-clean waiver applies to the on-disk file only; the text this command writes is scanned on its own
+        if (texts.indexOf(text) === fromDisk && committedAndClean(abs, installRoot)) continue
+        return { deny: true, reason: 'tmux-script' }
+      }
+    }
+  }
+  return null
+}
+
 // Pure decision: does this tool call set up self-pace / self-injection?
 export function gateDecision(toolName, toolInput, opts = {}) {
   const name = String(toolName ?? '')
@@ -550,6 +946,13 @@ export function gateDecision(toolName, toolInput, opts = {}) {
       // the egress allowlist: a plain read only (EGRESSSELFEDIT824)
       if (!allowlistBashSegmentAllowed(seg)) return { deny: true, reason: 'egress-allowlist' }
     }
+    // AFTER the per-segment checks above, so their specific reasons (the egress allowlist) still win. The tmux write
+    // primitive by inverted proof (card 9f57f705): the word may only appear as a read call; an interpreter may run a script
+    // file only when the gate can name and read it, and that file may mention tmux only as a read. Whole-command.
+    if (!tmuxMentionAllowed(safeCommand)) return { deny: true }
+    const run = interpreterRunVerdict(safeCommand, opts.cwd, String(toolInput?.command ?? ''), opts.installRoot)
+    if (run) return run
+
     // The scheduler check is the ANCHORED one -- it fires on what sits at a
     // segment START -- so it is the one a fake segment boundary can mislead, and
     // the only one that gets quote-aware segments. Null (unresolvable quoting)
@@ -576,6 +979,13 @@ const ALLOWLIST_GATE_MSG =
   'store/egress-allowlist.json-t: ez a kapu RAD vonatkozik. Ha egy domain kell, kerd a fo ' +
   'agenst (inter-agent uzenet: domain + miert); o a gazda jovahagyasaval veszi fel. ' +
   'Olvasni szabad: cat / grep / jq a fajlra (ertelmezo -- python, node -- nem).'
+
+const SCRIPT_PATH_GATE_MSG =
+  'Interpreter egy szamitott vagy olvashatatlan szkript-uton TILTOTT (governance hard-gate, kartya 9f57f705). A kapu ' +
+  'csak azt engedi lefutni, amit el tud olvasni: adj LITERALIS utat (python3 /abs/ut/x.py), vagy allitsd be a valtozot ' +
+  'UGYANABBAN a parancsban literal ertekkel (S=/abs/ut; python3 $S/x.py). A relativ ut egy kovethetetlen cd utan, egy ' +
+  'glob, egy kornyezetbol vagy ciklusbol jovo valtozo, egy hianyzo vagy tul nagy fajl nem bizonyithato. Inline kod (-c, ' +
+  'heredoc) szovegkent olvasott, az nem erinti.'
 
 function allow() { process.exit(0) }
 
@@ -607,6 +1017,6 @@ if (isInvokedDirectly()) {
     allow() // malformed/empty input must never break the agent's tool calls
   }
   const { deny: shouldDeny, reason } = gateDecision(payload?.tool_name, payload?.tool_input, { cwd: payload?.cwd })
-  if (shouldDeny) deny(reason === 'egress-allowlist' ? ALLOWLIST_GATE_MSG : GATE_MSG)
+  if (shouldDeny) deny(reason === 'egress-allowlist' ? ALLOWLIST_GATE_MSG : reason === 'script-path' ? SCRIPT_PATH_GATE_MSG : GATE_MSG)
   allow()
 }

