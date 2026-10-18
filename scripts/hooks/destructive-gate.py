@@ -2048,6 +2048,13 @@ def segments_pos(text):
             close = _matching_paren(text, state, i + 2)
             if close >= 0:
                 borders.add(close)
+        if hit is None and text[i] in '<>' and text[i + 1:i + 2] == '(' and ((start in tails and ws >= i) or _command_still_to_come(text[cs:i])):
+            # Card 8c16a013 round 2 (Sam 4854): a process substitution is the VALUE of an assignment or the target of a redirection (`x=<(echo)`, `x=>(cat)`):
+            # the command follows its `)` exactly as it follows the `)` of a `$(..)` there. Without the border a nested `$(..)` inside it cut the text at the
+            # inner opener (`x=<(echo $(date)) r${X}m` read as `x=<(echo ` and `date)) r${X}m`: `date` was the command, the word behind it an argument).
+            close = _matching_paren(text, state, i + 2)
+            if close >= 0:
+                borders.add(close)
         if hit is None and text.startswith('${', i) and text[i + 2:i + 3] in (' ', '\t', '\n', '|') \
                 and ((start in tails and ws >= i) or _command_still_to_come(text[cs:i])):
             close = _matching_brace(text, state, i + 2)       # a function substitution is a command list: its body is cut like `$(..)`, the `}` is a border
@@ -2414,7 +2421,20 @@ def _built_by_expansion(seg, spans, idx):
     `r${X}m`, `r$(echo m)`, `"${X}"rm`, `${p:0:1}${p:1}`): the shell builds the name at run time. A word that IS a variable is judged by the variable rule."""
     eflags = _bare_expansion_flags(seg)
     tok = spans[idx][0]
-    if len(eflags) == len(spans) and eflags[idx] and not _VAR_NAME_RE.match(tok) and _name_built_by_expansion(tok):
+    if len(eflags) == len(spans):
+        has_exp = eflags[idx]
+    else:
+        # Card 8c16a013 round 2 (Sam 4854): the two readers cut the words differently when a `<` or `>` is glued to a word (`x=<(echo) r${X}m`: _token_spans
+        # cuts `x=` `<` `echo`, the flag reader keeps `x=<`), so the flag of word `idx` is the flag of ANOTHER word and the old `len(..) == len(..)` test
+        # read "no expansion" there: a hole, open at every earlier head. Inverted: when the lists disagree the flag is read from the command word's own span,
+        # from the part after its last slash (a `$` or a backtick outside single quotes).
+        bare = seg.replace('(', ' ').replace(')', ' ')
+        a, b = spans[idx][2], spans[idx][3]
+        qs, w = _quote_map(bare), bare[a:b]
+        base = w.rfind('/') + 1
+        has_exp = any(qs[a + k] != 1 and (w[k] == '`' or (w[k] == '$' and k + 1 < len(w) and (w[k + 1].isalnum() or w[k + 1] in '{(_@*#?!$-')))
+                      for k in range(base, len(w)))
+    if has_exp and not _VAR_NAME_RE.match(tok) and _name_built_by_expansion(tok):
         return 'a name built by an expansion'
     return None
 

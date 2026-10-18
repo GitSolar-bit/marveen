@@ -3873,6 +3873,34 @@ for _fv in ("${ }rm -rf " + GROOT + "/store", "${ }git push --force origin x", "
 check("_bare_expansion_flags: only the part after the last slash counts, and a single-quoted dollar is not an expansion",
       gate._bare_expansion_flags("a ${D}/x ${D}/${n} 'x$y' \"$z\"q r`s`t") == [False, False, True, False, True, True])
 
+# ---------------------------------------------------------------------------------------------------------------------------
+print("8c16a013 round 2 -- a process substitution as the value of an assignment (x=<(..), x=>(..)) is a lead like x=$(..) (Sam 4854):")
+_LEAD8C2 = ["x=<(echo) ", "x=>(cat) ", "x=<(:) ", "x=<(echo) y=1 ", "y=1 x=<(echo) ", "x=<(echo $(date)) ", "x=<(echo `date`) ", "2>&1 x=<(echo) ", "x=<(echo) x=>(cat) ",
+            "env x=<(echo) ", ">f x=<(echo) ", "x=<(echo $(echo $(date))) ", "x=>(cat $(date)) ", "x=>(cat `date`) "]
+_BODY8C2 = ["r${X}m -rf TGT", "r${X:-}m -rf TGT", '"r${X}m" -rf TGT', "r${X}m${X} -rf TGT", "${X}rm -rf TGT", "g${X}it push --force origin x"]
+_WRAP8C2 = [("at the top level", "%s"), ("in a case arm", "case x in x) %s;; esac"), ("behind a brace group opener", "{ %s ; }"), ("in a subshell", "( %s )")]
+for _bd in _BODY8C2:
+    for _ld in _LEAD8C2:
+        for _lw, _w in _WRAP8C2:
+            _t = _w % (_ld + _bd)
+            _ran = _real_bash_runs_cmd(_t.replace("TGT", "nothere"))
+            check("8c16a013 r2 fixture is real (bash runs it): %s %r" % (_lw, _t), _ran is None or _ran or "git push" in _t)
+            check("8c16a013 r2 refused: %s %r" % (_lw, _t), blocks_cwd(_t.replace("TGT", GROOT + "/backups"), GROOT))
+for _x in ("x=<(echo) /bin/r${X}m -rf TGT", "x=<(echo) $'r'${X}m -rf TGT", "x=>(cat $(date)) /bin/r${X}m -rf TGT"):
+    check("8c16a013 r2 refused (a path or an ANSI-C piece in the word; the fake rm is not on /bin, so no bash fixture): %r" % _x, blocks_cwd(_x.replace("TGT", GROOT + "/backups"), GROOT))
+for _q in ["x=<(echo) r'${X}'m -rf x", "x=<(echo) ${D}/run.sh", "x=<(echo) /usr/${D}/ls /tmp", "x=>(cat $(date)) r'${X}'m", "x=<(echo) echo ok", "x=<(echo) ls ${X}/a", "x=<(echo) echo r${X}m", "x=<(echo $(date)) cat $X", "x=>(cat) true", "diff <(ls) <(ls -a)", "echo $(date) r${X}m",
+           "cat <(echo a) r${X}m", "x=<(date) echo r${X}m", "cat <(echo $(date)) | head -1", "y=1 x=<(echo $(date)) ls /tmp", "echo <(date) r${X}m", "x=<(echo) git log --oneline -n 1"]:
+    check("8c16a013 r2 stays quiet (the process substitution is an argument or a value, the command is plain): %r" % _q, not blocks_cwd(_q, GROOT))
+_S8C2 = 'x=<(echo) r${X}m -rf x'
+_SP8C2 = _S8C2.replace("(", " ").replace(")", " ")
+check("_built_by_expansion: the flag list and the span list disagree (a glued <), the command word is judged from its own span",
+      gate._built_by_expansion(_S8C2, gate._token_spans(_SP8C2), gate.command_index(gate._bare_tokens(_S8C2))) == "a name built by an expansion"
+      and len(gate._bare_expansion_flags(_S8C2)) != len(gate._token_spans(_SP8C2)))
+check("segments_pos: the `)` that closes a process substitution in an assignment is a border, the command behind it is its own segment",
+      [s for s, _p in gate.segments_pos("x=<(echo $(date)) r${X}m -f x")][-1] == "r${X}m -f x"
+      and [s for s, _p in gate.segments_pos("cat <(echo $(date)) r${X}m")][-1] != "r${X}m"
+      and [s for s, _p in gate.segments_pos("diff <(ls) <(ls)")] == ["diff <(ls) <(ls)"])
+
 print()
 if failed:
     print("%d FAILED: %s" % (len(failed), failed), file=sys.stderr)
