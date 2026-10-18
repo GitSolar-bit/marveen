@@ -2198,3 +2198,27 @@ Measured against real bash (a canary file in a scratch jail; the gate sees the s
 Price (the whole corpus, 36,361 unique recorded Bash commands, OLD = 8100dd3e from its own worktree, both gates loaded in-process with the same cwd): 34,818 allowed on both, 1,543 denied on both, **0 newly allowed, 0 newly denied**, 0 error rows. Mutants (`deecccda-mutants/mutants_case_bdcfa13a_r2.py`): 11 of this round, 6 killed (no check on the arm; the check reading from the case head; the check reading from the next segment; the cut finding no parenthesis; the cut unused; the cut taking the first parenthesis). 5 survive, none a hole: the blank skip in front of the arm (`_opaque_substitution` ignores leading blanks), the cut ignoring quotes (a quoted `)` leaves a stray quote in the prefix, which the reader does not take for a command either way), the funsub branch keeping the old prefix (the `;` inside `${ ..; }` cuts a second segment that is refused on its own), the cut applied to texts without a `case` (stricter, not looser: it is scoped on purpose so that no other text changes) and the cut starting at the parenthesis itself (`_bare_tokens` turns it into a blank).
 
 Named limit: `2>&1 r$(echo)m -rf` (a redirection in front of a substituted command word) is still open outside a case as well; it is card 6b631f69 round 4 (Sam 4740).
+
+# The & of a redirection is not a border (card 6b631f69 round 4, Sam 4740)
+
+`2>&1 r$(echo)m -rf <dir>` ran rm and passed the whole chain, with eleven siblings: `1>&2`, `>&2`, `<&0` and `2>&-` in front, `` r`echo`m ``, `r$(:)m`, `$(echo rm)`, `"r$(echo)m"`, `command r$(echo)m`, `x=1 2>&1 r$(echo)m`, and `g$(echo)it push --force`. Behind `>/dev/null`, `2>/dev/null` and `&>/dev/null` the same words were already refused, and so was `2>&1` behind the command (`ls 2>&1 r$(echo)m` is an argument), which is the boundary Sam measured: the lead has to be a duplicating redirection (`>&`, `<&`) and the word has to be built by a substitution.
+
+Cause: `_opaque_substitution` finds where the command's own words begin by walking back from the substitution to the nearest unquoted `;`, `&`, `|`, newline, `(` or `{`. The `&` of `2>&1` stopped the walk, so the prefix it read was `1 r`: `1` was taken for the command and `r$(echo)m` for one of its arguments (nothing to say, the glued substitution is an argument). The same set of characters decided the "a separator inside the glued prefix means the quote map lost sync, nothing is known" skip, which dropped the finding a second time.
+
+Fix: `_border_at` (a `&` ends a command only where `_is_background_amp` says so, the helper the segment splitter has used since card 95d0cbc5; `;`, `|`, newline, `(`, `{` as before) replaces the character set in both back-walks, and `_has_separator` replaces the `any(c in ';&|\n')` tests of the glued prefix in both branches (the plain glued one and the double-quoted glued one). Nothing else changes: a lone `&`, `&&`, `|&` and an unquoted `;` are borders as before.
+
+Measured: Sam's twelve shapes are refused now; a probe of 11 shapes against the real bash (a canary) found 0 holes. Mutants (`deecccda-mutants/mutants_amp_6b631f69_r4.py`): 9 of this round, 9 killed. Metamorphic check over the denied corpus (1,547 commands, each behind 9 redirection and assignment leads, 13,923 variants): one variant is allowed, a `for .. do` compound behind a lead, which is a shell syntax error in bash and was allowed by the old gate as well. Price: one corpus run covers both rounds, it is in the next section.
+
+# A closed substitution in front of the command word (card 8c16a013, Sam 4779)
+
+`x=$(echo) r$(echo)m -rf <dir>` ran rm and passed round 4. `x=1 r$(echo)m`, `` x=`echo` r$(echo)m `` and `x="$(echo)" r$(echo)m` were refused already (no parenthesis in front, or a quoted one), so only an assignment or a redirection target holding a `$(..)`, `$((..))` or `${ .. }` value slipped through.
+
+Cause: the back-walk of `_opaque_substitution` stopped at the inner `(` of a substitution that was already closed in front of the word. For `x=$(echo) r$(echo)m -rf X` it read the prefix `echo) r`, found `echo` to be the command and `r..` one of its arguments, while the shell runs rm.
+
+Fix: `_walk_back` steps over each closed `$(..)`, `(..)` or `${ .. }` behind the word (its opener is found by `_open_of`, nesting and quotes counted) and returns the prefix with every such group replaced by one word `X`: the prefix of `x=$(echo) r$(echo)m` is `x=$X r`, and the command is `r..`. An unmatched opener is still a border. Both back-walks (the glued word and the substitution as the word) use it.
+
+Measured against real bash (a fake rm and git on PATH, a canary file): 7 words x 13 leads x 4 wrappers, plus 15 quiet controls, all as expected. Mutants (`deecccda-mutants/mutants_closedgroup_8c16a013.py`): 10, 10 killed (the first run left one in the quote handling of the group opener; quoted-parenthesis leads were added to the tests).
+
+Price (the whole corpus, 36,933 unique recorded Bash commands, OLD = 645172b0 from its own worktree, NEW = the head with both rounds): 35,386 allowed on both, 1,547 denied on both, **0 newly allowed, 0 newly denied**. Tests: `destructive-gate.test.py` 4,352 PASS, 0 FAIL.
+
+Named limit: `source <(echo rm ..)` and the `eval` output class are open with or without a lead (cards 30500dad and e766e16c); this change does not touch them.
