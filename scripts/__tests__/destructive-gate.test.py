@@ -21,6 +21,7 @@ Futtatas: python3 <ezafajl>   Exit 0 = minden teszt zold.
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -779,6 +780,7 @@ with tempfile.TemporaryDirectory() as td:
 print()
 print("SAJAT MUNKATERULET -- eles telepiteseken a sajat <nev> alatt szabad torolni:")
 
+import shlex
 import shutil
 _saved = (gate.PROJECT_ROOT, gate.AGENTS_MUNKA_ROOT, gate.OWN_AGENT)
 
@@ -3900,6 +3902,34 @@ check("segments_pos: the `)` that closes a process substitution in an assignment
       [s for s, _p in gate.segments_pos("x=<(echo $(date)) r${X}m -f x")][-1] == "r${X}m -f x"
       and [s for s, _p in gate.segments_pos("cat <(echo $(date)) r${X}m")][-1] != "r${X}m"
       and [s for s, _p in gate.segments_pos("diff <(ls) <(ls)")] == ["diff <(ls) <(ls)"])
+
+print()
+print("30500dad -- eval joins the EXPANDED words into a command line, source runs what a process substitution prints (Sam 4157):")
+_BODY30 = [
+    'eval "$(echo MARK)"', 'eval $(echo MARK)', 'eval `echo MARK`', 'eval "`echo MARK`"', 'eval "echo ok; $(echo MARK)"', 'eval -- "$(echo MARK)"',
+    'eval "$(printf \'MARK\')"', 'eval "${NOPE:-MARK}"', 'x="; MARK"; eval "echo $x"', 'x="MARK"; eval $x', "eval $'MARK'", 'eval "$(cat <<\'EOF\'\nMARK\nEOF\n)"',
+    'source <(echo MARK)', '. <(printf "MARK")', 'source -- <(echo MARK)', "eval 'eval \"$(echo MARK)\"'", "eval 'source <(echo MARK)'", 'eval "eval \\"\\$(echo MARK)\\""',
+    '"eval" "$(echo MARK)"', "'eval' \"$(echo MARK)\"", '\\eval "$(echo MARK)"',
+]
+_WRAP30 = [("at the top level", "%s"), ("behind a separator", "echo a; %s"), ("after a newline", "echo a\n%s"), ("in a brace group", "{ %s\n}"), ("in a subshell", "( %s\n)"),
+           ("in an if", "if true; then %s\nfi"), ("in a for", "for i in 1; do %s\ndone"), ("in a function", "f() { %s\n}; f"), ("in a case arm", "case x in x) %s\n;; esac"),
+           ("behind &&", "true && %s"), ("behind time", "time %s"), ("behind builtin", "builtin %s"), ("behind command", "command %s"), ("behind an assignment", "X=1 %s"),
+           ("behind a redirection", "2>&1 %s"), ("in bash -c", "bash -c %s"), ("in a substitution", 'echo "$(%s)"'), ("in a pipe group", "echo hi | { %s\n}")]
+for _bd in _BODY30:
+    for _lw, _w in _WRAP30:
+        if _lw in ("behind builtin", "behind command") and not _bd.lstrip("\"'\\").startswith(("eval", "source", ".")):
+            continue
+        _t = (_w % shlex.quote(_bd)) if _lw == "in bash -c" else (_w % _bd)
+        _ran = _real_bash_runs_cmd(_t)
+        check("30500dad fixture is real (bash runs it): %s %r" % (_lw, _t), _ran is None or _ran)
+        check("30500dad refused: %s %r" % (_lw, _t), blocks_cwd(_t.replace("MARK", "rm -rf " + GROOT + "/backups"), GROOT))
+for _q in ('eval "echo hi"', "eval 'echo $x'", "eval ls", "eval", 'eval "true"; echo $(date)', "source ~/.bashrc", ". ./venv/bin/activate", 'source "$HOME/.bashrc"', "source $F arg",
+           'echo "$(eval echo hi)"', 'echo eval "$(date)"', 'grep -n "eval" file | head', 'git log --grep="eval $(x)"', "eval 'a=1; echo $a'", 'eval "echo \\$HOME"',
+           'eval "echo \\"\\$(date)\\""', "source ./a.sh <(echo x)", "echo source <(date)", "cat <(date) | head -1", "diff <(ls) <(ls -a)", "eval 'ls -l'", 'eval "ls $HOME/x" | wc -l'.replace("$HOME", "/tmp")):
+    check("30500dad stays quiet (a literal eval or a source of a file): %r" % _q, not blocks_cwd(_q, GROOT))
+check("_dynamic_in: what the shell expands before it uses the words is found, a single-quoted or escaped one is not",
+      [bool(gate._dynamic_in(t, gate._quote_map(t), 0, len(t))) for t in ('"$(a)"', "`a`", '"${a}"', "$a", '"$1"', "$@", "$'a'", "<(a)", "'$(a)'", "'`a`'", '\\$(a)', '"\\$a"', "a $ b", "a$", "plain", '"a"')]
+      == [True, True, True, True, True, True, True, True, False, False, False, False, False, False, False, False])
 
 print()
 if failed:

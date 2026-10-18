@@ -2345,6 +2345,80 @@ def _proof_of(cmd):
         return None
 
 
+def _dynamic_in(text, qs, a, e):
+    """Card 30500dad: why text[a:e] (read with the shell reader's quote map `qs`) holds something the shell expands BEFORE it uses the words as a program
+    (`$(..)`, a backtick, `${..}`, `$x`, `$1`, `$'..'` / `$".."`, a process substitution `<(..)` / `>(..)`), or None. A single-quoted character is literal; in double quotes
+    only `$` and a backtick act (a backslash takes the next `$`, backtick, quote or backslash)."""
+    i = a
+    while i < e:
+        ch, st = text[i], qs[i]
+        if st == 1:
+            i += 1
+            continue
+        if ch == '\\' and (st == 0 or text[i + 1:i + 2] in ('$', '`', '"', '\\')):
+            i += 2
+            continue
+        if ch == '`':
+            return 'a command substitution (backtick)'
+        if ch == '$':
+            nx = text[i + 1:i + 2]
+            if nx in ('(', '{'):
+                return 'an expansion ($%s)' % nx
+            if st == 0 and nx in ("'", '"'):
+                return 'ANSI-C or locale quoting ($%s)' % nx
+            if nx and (nx.isalnum() or nx in '_@*#?!$-'):
+                return 'a variable ($%s)' % nx
+        if st == 0 and ch in '<>' and text[i + 1:i + 2] == '(':
+            return 'a process substitution (%s()' % ch
+        i += 1
+    return None
+
+
+def _dynamic_program_argument(text, seg, seg_pos, toks, idx, proof=None):
+    """Card 30500dad (Sam 4157): `eval` joins its arguments AFTER the shell has expanded them and runs the result as a command line, and `source` / `.` runs
+    the file it is given, which for a process substitution is whatever the substitution prints. `eval "$(echo rm -f X)"`, `eval $(..)`, `` eval `..` ``,
+    `eval "echo $x"` (x holding `; rm -f X`), `source <(echo rm -f X)`, `. <(..)` all ran the command and passed, while the same text in `sh -c` was refused:
+    the script the recursion judged for an `eval` is cut at the substitution (`$ echo rm -f X`), so no rule met the real word. Inverted proof (rule 11): an
+    `eval` whose arguments are not literal, and a `source` / `.` whose file is a process substitution, are refused; the literal ones go on to the script check
+    as before. Returns the reason, or None."""
+    name = _cname(toks[idx][0])
+    if name not in ('eval', 'source', '.'):
+        return None
+    bare = seg.replace('(', ' ').replace(')', ' ')
+    spans = _token_spans(bare)
+    placed = idx < len(spans)
+    if placed:
+        a, b = spans[idx][2], spans[idx][3]
+        placed = text[seg_pos + a:seg_pos + b].replace('(', ' ').replace(')', ' ') == bare[a:b]
+    if not placed or proof is None:
+        # The reader cannot place the word (or read the command): refuse only if the simple command holds something that could be expanded.
+        tail = text[seg_pos:]
+        for k, ch in enumerate(tail):
+            if ch in ';|\n':
+                tail = tail[:k]
+                break
+        if name == 'eval' and re.search(r'[$`]|[<>]\(', tail):
+            return 'the shell reader cannot place the eval word, and the line holds an expansion'
+        if name != 'eval' and re.search(r'(?:source|\.)[ \t]+(?:--[ \t]+)?<\(', tail):
+            return 'the shell reader cannot place the source word, and its file is a process substitution'
+        return None
+    qs, _top = proof
+    start = seg_pos + b
+    end = _simple_command_end(text, qs, start)
+    if name == 'eval':
+        return _dynamic_in(text, qs, start, end)
+    k = start
+    while k < end and text[k] in ' \t':
+        k += 1
+    if text.startswith('--', k) and text[k + 2:k + 3] in (' ', '\t'):
+        k += 2
+        while k < end and text[k] in ' \t':
+            k += 1
+    if qs[k:k + 1] == [0] and text[k:k + 2] in ('<(', '>('):
+        return 'a process substitution as the file to source'
+    return None
+
+
 def _unreadable_command_word(text, seg, seg_pos, idx, proof=None):
     """Why the command word (token `idx` of `seg`, which stands at `seg_pos` of `text`) is not a name the gate can read, or None (card 4b42b6b0
     round 3, Sam 1901). A word with an UNQUOTED brace expansion (`{rm,-f,x}`, `r{m,}`, `{r..r}m`, `r{m,}$X`, `"a b"{c,d}`) or, when the word holds a slash
@@ -5914,6 +5988,11 @@ def _check_bash(cmd, _depth=0, cwd=None):
                     block('A parancsnev idezetlen {..} vagy * ? [..] karaktert vagy kifejtest tartalmaz (%s; %s): a shell ebbol kifejtes utan MAS nevet csinal '
                           '(`{rm,-f,x}`, `r{m,}`, `/usr/bin/r[m]`, `${X}rm`, `r$(echo m)`), a kapu a szoveget latja, ezert nem tudja eldonteni, MI a parancs, '
                           'es nem engedi at. Ird ki a parancs nevet.\n(a teljes szegmens: %s)' % (toks[idx][0], why, seg[:160]))
+                dyn = _dynamic_program_argument(_real, seg, seg_pos, toks, idx, _proof)
+                if dyn:
+                    block('Az eval / source programja kifejtesbol jon (%s): az eval a szavait kifejtes UTAN fuzi parancssorra es futtatja, a `source <(..)` a '
+                          'behelyettesites kimenetet futtatja fajlkent; a kapu a szoveget latja, nem azt, ami lefut, ezert nem tudja eldonteni, MI a parancs, es nem '
+                          'engedi at. Ird ki a parancsot literalisan.\n(a teljes szegmens: %s)' % (dyn, seg[:160]))
         for seg in segments(shell_text):
             seg = _strip_funcdef(seg)
             toks = _bare_tokens(seg)
@@ -6062,7 +6141,15 @@ def _check_bash(cmd, _depth=0, cwd=None):
         elif idx is not None and not toks[idx][1] and os.path.basename(toks[idx][0]) in ('pushd', 'popd'):
             hm_cwd = None
 
-        for sub in _sub_scripts(toks, idx):
+        _subs = _sub_scripts(toks, idx)
+        if idx is not None and _cname(toks[idx][0]) == 'eval':
+            # Card 30500dad: _bare_tokens blanks the parentheses, so an eval whose (literal, single-quoted or escaped) argument holds `$(..)` / `<(..)` reached
+            # the recursion as `$ echo rm -f X`, and no rule met the real text. The real words go in as well.
+            _rt = _tokens(seg)
+            _ri = command_index(_rt)
+            if _ri is not None:
+                _subs = _subs + [x for x in _sub_scripts(_rt, _ri) if x not in _subs]
+        for sub in _subs:
             if not sub or sub == cmd:
                 continue
             if _depth >= _MAX_NEST:
