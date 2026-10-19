@@ -663,6 +663,10 @@ def _heredoc_opener_runs_body(head, before=''):
         pass
     if m and _heredoc_opener_runs_body(seg[m.end():], ctx):
         return True
+    fm = _FUNC_HEAD.match(seg)
+    if fm:
+        seg = seg[fm.end():]            # card 7f47a834 (Sam 2107 part 1): `function f {`, `f () {`, `function f () {` in front of the command: the header
+                                        # is not the command, as the glued `f() {` form was not already (6c7cd4d7); the body ran on every head
     toks = [t for t in (x.lstrip('(') for x in re.split(r'\s+', seg.strip())) if t]    # (card f917c895: `(source /dev/stdin <<EOF`, `{ (source ..`: a glued `(` is a subshell opener)
     k = 0
     while k < len(toks) and (re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', toks[k])
@@ -2174,6 +2178,12 @@ def _case_pass(text, state, out):
         k = 0
         while k < len(spans) and spans[k][0] in _CASE_LEAD and not spans[k][1]:
             k += 1
+        if k < len(spans) and spans[k][0] == 'coproc' and not spans[k][1]:
+            # card 7f47a834 (Sam 2107 part 2f): `coproc X case x in x) rm ..;; esac` ran rm on every head: command_index steps over `coproc NAME`,
+            # but the case head was looked for behind the keywords of _CASE_LEAD only, so the arms never became segments of their own
+            k += 1
+            if k + 1 < len(spans) and spans[k + 1][0] == 'case' and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', spans[k][0]) and not spans[k][1]:
+                k += 1
         if depth and k == 0 and spans and spans[0][0] == 'esac' and not spans[0][1]:
             depth -= 1
             rest = seg[shift + spans[0][3]:]
@@ -2535,7 +2545,7 @@ def _strip_funcdef(seg):
     return _FUNCDEF_RE.sub('', seg, count=1)
 
 
-_COPROC_OPEN_RE = re.compile(r'(?<![\w./-])coproc[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*\((?=[ \t])')
+_COPROC_OPEN_RE = re.compile(r'(?<![\w./-])coproc[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*\((?!\()')    # (card 7f47a834: `coproc X (cmd)` glued is the same subshell; `((` is arithmetic)
 
 
 def _bare_tokens(seg):
@@ -2549,7 +2559,10 @@ def _bare_tokens(seg):
             out.append(seg[i:i + 2])
             i += 2
             continue
-        out.append('{' if (i in cp_open and not state[i]) else (' ' if seg[i] in '()' else seg[i]))
+        # card 7f47a834 (Sam 2107 part 2, p2b): `coproc X (cmd)` with the parenthesis GLUED to the command made one word `{cmd` of the opener and
+        # the command, so command_index saw no opener behind NAME and read NAME as the command. A blank after the opener keeps it a word of its own
+        # (the tokens carry no offsets, only a quoted flag, so the length change is harmless).
+        out.append('{ ' if (i in cp_open and not state[i]) else (' ' if seg[i] in '()' else seg[i]))
         i += 1
     return [(t, sp) for t, sp in _tokens(''.join(out)) if t]
 

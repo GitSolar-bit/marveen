@@ -4239,6 +4239,35 @@ check("_heredoc_opener_runs_body: keywords, group openers and a function header 
       == [True, True, True, True, True, True, False, False, False, True, True, True])
 
 print()
+print("7f47a834 (Sam 2107 / 4927 uncovered parts 1, 2 and 4): a function header on the opener line, coproc NAME in front of a compound command, elif / else as the opener:")
+# Sam's shapes by his label (probe-30500dad/shapes-sam4927-uncovered-parts.json; MARK = the fake rm on the canary), plus extras and quiet controls.
+_S7F = {
+    'p1a': 'function f { source /dev/stdin <<EOF\nMARK\nEOF\n}; f',
+    'p1b': 'f () { source /dev/stdin <<EOF\nMARK\nEOF\n}; f',
+    'p1c': 'function f () { source /dev/stdin <<EOF\nMARK\nEOF\n}; f',
+    'p1d': 'function f { . /dev/stdin <<EOF\nMARK\nEOF\n}; f',
+    'p2a': 'coproc X ( MARK ); wait',
+    'p2b': 'coproc X (MARK); wait',
+    'p2c': 'coproc X while true; do MARK; break; done; wait',
+    'p2d': 'coproc X for i in 1; do MARK; done; wait',
+    'p2e': 'coproc X if true; then MARK; fi; wait',
+    'p2f': 'coproc X case x in x) MARK;; esac; wait',
+    'p4a': 'if false; then :; elif source /dev/stdin <<EOF\nMARK\nEOF\nthen :; fi',
+    'p4b': 'if false; then :; else source /dev/stdin <<EOF\nMARK\nEOF\nfi',
+    'p4c': 'if false; then :; elif true; then source /dev/stdin <<EOF\nMARK\nEOF\nfi',
+    'p4d': 'while false; do :; done; until true; do :; done; else_x=1; source /dev/stdin <<EOF\nMARK\nEOF',
+}
+_X7F = ['function f { bash <<EOF\nMARK\nEOF\n}; f', 'function f { coproc X (MARK); wait\n}; f', 'coproc _c1 (MARK); wait', 'coproc X\t(MARK); wait', 'if true; then coproc X (MARK); wait; fi', 'coproc X (cd /tmp && MARK); wait', 'coproc X ( (MARK) ); wait', 'coproc case x in x) MARK;; esac; wait', 'coproc X case x in (x) MARK;; esac; wait', 'coproc X until false; do MARK; break; done; wait', 'f () { if false; then :; else MARK\nfi\n}; f']
+_Q7F = ['coproc X (sleep 1); wait', 'coproc X { sleep 1; }; wait', 'coproc X (echo hi)', 'coproc (sleep 1)', 'coproc X ((1+1)); wait', 'coproc X (cd /tmp && ls); wait', 'coproc X ( echo "(x)" )', 'coproc X case x in x) echo hi;; esac; wait', 'function f { cat <<EOF\nMARK\nEOF\n}; f', 'f () { cat <<EOF\nMARK\nEOF\n}; f', 'if false; then :; else cat <<EOF\nMARK\nEOF\nfi', 'function f { tee /tmp/x.txt <<EOF\nMARK\nEOF\n}; f', 'function f { python3 x.py <<EOF\nMARK\nEOF\n}; f']
+for _l, _t in list(_S7F.items()) + [("extra%d" % _i, _t) for _i, _t in enumerate(_X7F)]:
+    _ran = _real_bash_runs_cmd(_t.replace("TGT", "nothere"))
+    check("7f47a834 fixture is real (bash runs it): %s %r" % (_l, _t), _ran is None or _ran)
+    check("7f47a834 refused: %s %r" % (_l, _t), blocks_cwd(_t.replace("MARK", RM + " -rf TGT").replace("TGT", GROOT + "/backups"), GROOT))
+for _i, _t in enumerate(_Q7F):
+    check("7f47a834 stays quiet (a plain coproc, arithmetic, or the body is data): extraq%d %r" % (_i, _t), not blocks_cwd(_t.replace("MARK", RM + " -rf TGT").replace("TGT", GROOT + "/backups"), GROOT))
+check("_bare_tokens: a glued coproc opener is a word of its own (7f47a834 p2b)", [t for t, _q in gate._bare_tokens("coproc X (ls)")] == ["coproc", "X", "{", "ls"] and [t for t, _q in gate._bare_tokens("coproc X ( ls )")] == ["coproc", "X", "{", "ls"])
+
+print()
 if failed:
     print("%d FAILED: %s" % (len(failed), failed), file=sys.stderr)
     sys.exit(1)
