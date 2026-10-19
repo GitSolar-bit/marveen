@@ -4038,10 +4038,52 @@ for _q in ['echo $(( ($(date +%s)-t)/86400 ))', 'x=$(( ($(date +%s)-t)/86400 ))'
     check("358a37db stays quiet (arithmetic holds no command): %r" % _q, not blocks_cwd(_q, GROOT))
 for _x in ['echo "$(( (' + RM + ' -rf TGT) ))"', 'x="$(( (' + RM + ' -rf TGT)+1 ))"', 'echo "$(( 1 + $(' + RM + ' -rf TGT) ))"', 'echo "x$(' + RM + ' -rf TGT)"']:
     check("358a37db refused (a command inside a double-quoted arithmetic expansion is still read): %r" % _x, blocks_cwd(_x.replace("TGT", GROOT + "/backups"), GROOT))
+
+print()
+print("e766e16c / 358a37db round 2 (Sam 4982): a bare (( without an adjacent )) is two subshells; an interpreter whose stdin is a process substitution; the opener line's tail:")
+# Sam's round-1 shapes by his label (s1 / s3 / s4 of agents_munka/sam/lp-e65a/probe), RMW = the rm word inside an expansion, MARK = the fake rm on the canary.
+_R2SAM = {
+    'b11': 'cat <<EOF > >(bash)\nMARK\nEOF',
+    'b13': 'bash < <(cat <<EOF\nMARK\nEOF\n)',
+    'c10': '(($(echo RMW) -rf TGT) )',
+    'g1': '(($(echo RMW) -rf TGT) )',
+    'g3': '((`echo RMW` -rf TGT) )',
+    'g7': '((x=$(echo) r$(echo)m -rf TGT) )',
+    'g10': '(($(echo RMW) -rf TGT)\n)',
+    'h3': 'sh < <(cat <<EOF\nMARK\nEOF\n)',
+    'b15': 'cat <(cat <<EOF\nMARK\nEOF\n)',
+    'c20': '(($(echo RMW) -rf TGT))',
+    'e1': 'echo $(( ($(date +%s)-t)/86400 ))',
+    'e2': '(( ($(echo 1)) ))',
+    'e8': 'echo "$(( ($(echo RMW) -rf TGT) ))"',
+    'f1': 'diff <(sort a) <(sort b)',
+    'f3': 'echo ${#arr[@]}',
+    'f4': 'echo ${ date; }',
+    'f5': 'while read l; do echo $l; done < <(find . -name x)',
+    'f6': 'tee >(gzip > /tmp/f.gz) < a',
+    'f8': 'x=`date`; echo `whoami`',
+    'f9': 'echo "${HOME}" ${PWD}',
+}
+_R2REF = ['b11', 'b13', 'c10', 'g1', 'g3', 'g7', 'g10', 'h3']
+_R2QUIET = ['b15', 'c20', 'e1', 'e2', 'e8', 'f1', 'f3', 'f4', 'f5', 'f6', 'f8', 'f9']
+_R2EXTRA = ['bash 2>/dev/null <<EOF\nMARK\nEOF', 'sh >/dev/null <<EOF\nMARK\nEOF', 'bash 0< <(cat <<EOF\nMARK\nEOF\n)', 'bash < <(cat <<EOF\nMARK\nEOF\n) 2>&1', 'cat <<EOF >/dev/null > >(bash)\nMARK\nEOF', 'cat <<EOF > >(exec bash)\nMARK\nEOF', 'cat <<EOF > >(sh -s)\nMARK\nEOF', 'cat <<EOF > >(cat | bash)\nMARK\nEOF', '(($(echo RMW) -rf TGT) ) && true', 'true; (($(echo RMW) -rf TGT)\t)', '{ (($(echo RMW) -rf TGT) ); }', 'bash < /dev/null <<EOF\nMARK\nEOF']
+_R2EXTRAQ = ['bash x.sh 2>/dev/null <<EOF\nMARK\nEOF', "cat <<EOF > '>(bash)'\nMARK\nEOF", 'cat <<EOF > >(gzip > x.gz)\nMARK\nEOF', 'cat <<EOF > out.txt\nMARK\nEOF', '(( (1+2)*3 ))', 'for ((i=0;i<3;i++)); do :; done', 'if ((x > 10)); then :; fi', 'x=$(( ($(id -u)) ))', '(( x = 1 )); echo $x', 'cat <<EOF "> >(bash)"\nMARK\nEOF', 'cat <<EOF >(bash)\nMARK\nEOF', "cat <<EOF -- '> >(sh)'\nMARK\nEOF"]
+for _l, _t in [(_l, _R2SAM[_l]) for _l in _R2REF] + [("extra%d" % _i, _t) for _i, _t in enumerate(_R2EXTRA)]:
+    _t = _t.replace("RMW", RM)
+    _ran = _real_bash_runs_cmd(_t.replace("TGT", "nothere"))
+    check("e766e16c r2 fixture is real (bash runs it): %s %r" % (_l, _t), _ran is None or _ran)
+    check("e766e16c r2 refused: %s %r" % (_l, _t), blocks_cwd(_t.replace("MARK", RM + " -rf TGT").replace("TGT", GROOT + "/backups"), GROOT))
+for _l, _t in [(_l, _R2SAM[_l]) for _l in _R2QUIET] + [("extraq%d" % _i, _t) for _i, _t in enumerate(_R2EXTRAQ)]:
+    _t = _t.replace("RMW", RM)
+    check("e766e16c r2 stays quiet (arithmetic, data, a plain redirection, a quoted substitution): %s %r" % (_l, _t), not blocks_cwd(_t.replace("MARK", RM + " -rf TGT").replace("TGT", GROOT + "/backups"), GROOT))
+# Named neighbour, NOT this card: `bash < <(echo rm ..)` (Sam h4) is the producer class of card cfef60f8; the heredoc-body forms b13 / h3 above are closed.
+check("_dparen_is_arith: adjacency decides", gate._dparen_is_arith("(( (1+2)*3 ))", 1) and gate._dparen_is_arith("((x > 10))", 1) and not gate._dparen_is_arith("((echo a) )", 1)
+      and not gate._dparen_is_arith("((echo a)\n)", 1) and not gate._dparen_is_arith("((echo a)", 1) and gate._dparen_is_arith("(( \")\" ))", 1))
 check("dq_subst_programs: an arithmetic expansion is handed over whole, a command substitution as its body",
       gate.dq_subst_programs('echo "$(( ($(date +%s)-t)/86400 ))d" "$(ls)"') == ['$(( ($(date +%s)-t)/86400 ))', 'ls'])
-check("_arith_paren_group: the chain of ( in front ends in a (( that is not <((",
-      [gate._arith_paren_group(t, t.rindex("(")) for t in ("(( (", "(( ( (", "( (", "cat <(( (", "<((", "$(( (", "x (")] == [True, True, False, False, False, True, False])
+check("_arith_paren_group: the chain of ( in front ends in a (( that is not <(( AND that an adjacent )) closes (round 2 of card 358a37db: the fixtures are whole constructs now, a fragment has no closer to read)",
+      [gate._arith_paren_group(t, t.rindex("(")) for t in ("(( ( ) ))", "(( ( ( ) ) ))", "( ( ) )", "cat <(( ( ) ))", "<(( )", "$(( ( ) ))", "x ( )")] == [True, True, False, False, False, True, False]
+      and [gate._arith_paren_group(t, t.rindex("(")) for t in ("(( ( ) )", "(( (", "(( ( )\n)", "(( ( ) ) )")] == [False, False, False, False])
 check("_backtick_opens: backticks pair up from the start, an escaped or single-quoted one does not count",
       [gate._backtick_opens(t, gate._quote_map(t), t.rindex("`")) for t in ("echo `date`", "echo `", "x=`a` `", "echo \\` `", "echo '`' `", 'echo "`a`" `')] == [False, True, True, True, True, True])
 

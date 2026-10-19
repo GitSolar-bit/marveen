@@ -555,7 +555,19 @@ def _heredoc_opener_runs_body(head):
         # a regi, szelesebb olvasat. Igy ez a javitas SZIGORUAN szukebb valtozas --
         # csak a fenti, egyertelmu eset fordul at.
         return any(_interp_family(t.strip('"\'')) is not None for t in toks[k:])
+    pending = False
     for t in toks[k + 1:]:
+        if pending:
+            # card e766e16c round 2 (Sam 4982, b13 / h3): the word behind a redirection operator is its operand, not the program file. `bash < <(cat <<EOF`
+            # feeds the shell what the substitution prints, and that is the body; `bash < x.sh <<EOF` redirects fd 0 twice and the later one, the
+            # heredoc, wins, so the program is still the standard input (unchanged reading: stricter, never looser).
+            pending = False
+            continue                   # (`< <(..)`: nothing names a program file after it, the loop ends in the stdin reading below)
+        if re.fullmatch(r'\d*(?:<<<|<>|<&|>&|>>|&>|<|>)\d*-?', t):
+            pending = True             # an operator standing alone: the next word is its operand
+            continue
+        if re.match(r'^\d*(?:<<<|<>|<&|>&|>>|&>|<|>)', t):
+            continue                   # `2>/dev/null`, `>&2`, `</dev/null` glued: a redirection, not the program file
         if t in ('-', '-s') or t.strip('"\'') in _STDIN_PATHS:
             return True                # `-`, `-s`, or the stdin device named as the program file (`bash /dev/stdin <<EOF`)
         if t in SCRIPT_FLAGS:
@@ -569,6 +581,24 @@ def _heredoc_opener_runs_body(head):
 
 
 _HEREDOC_OPEN = re.compile(r'<<-?\s*([\'"]?)([A-Za-z_][A-Za-z0-9_]*)\1')
+
+
+_TAIL_OUT_PSUB_RE = re.compile(r'(?:&>|\d*>>?)[ \t]*>\(')
+
+
+def _heredoc_tail_runs_body(tail):
+    """The rest of the opener line BEHIND the `<<WORD`: when the command's output is redirected into an output substitution (`cat <<EOF > >(bash)`),
+    what the body's reader prints, the body itself for `cat`, is the program of the shell inside (card e766e16c round 2, Sam 4982 b11: the head-side
+    form `cat > >(bash) <<EOF` was already read, the order of the two redirections decided the verdict). The inside is read by the opener reader
+    (`bash`, `exec bash`, `cat | bash`, `sh -s`); a substitution that is an argument (`cat <<EOF >(bash)`: cat READS it) is not a redirection target,
+    and a stderr target is refused with the rest (`2> >(bash)`: stricter, never looser)."""
+    state = _quote_map(tail)
+    for m in _TAIL_OUT_PSUB_RE.finditer(tail):
+        o = m.end() - 1                        # a quoted `>(` is text: its parenthesis never closes for the quote-aware matcher, and the rest of the
+        close = _balanced_paren_end(tail, state, o)   # word (`bash)"`) names no interpreter; a guard here would only matter for a syntax error
+        if _heredoc_opener_runs_body(tail[o + 1:close if close >= 0 else len(tail)]):
+            return True
+    return False
 
 
 _CMD_CTX = frozenset(('top', 'sub', 'bt', 'par', 'fsub'))
@@ -803,7 +833,7 @@ def _heredoc_body_ranges(cmd):
     lines = cmd.split('\n')
     data, code = [], []
     for i, j, m, a, b in _heredocs(cmd):
-        runs = (_heredoc_opener_runs_body(lines[i][:m.start()]) or _heredoc_piped_to_program(lines, i, j, m)
+        runs = (_heredoc_opener_runs_body(lines[i][:m.start()]) or _heredoc_tail_runs_body(lines[i][m.end():]) or _heredoc_piped_to_program(lines, i, j, m)
                 or _heredoc_fd_read(lines, i, j, m))
         (code if runs else data).append((a, b))
     return data, code
@@ -5310,6 +5340,26 @@ def _open_of(text, state, k):
     return -1
 
 
+def _dparen_is_arith(text, k, state=None):
+    """Is the `((` whose SECOND `(` stands at text[k] an arithmetic command? Bash reads the text up to the `)` that matches that second `(` (quotes
+    and `$(..)` nest inside) and takes the pair for arithmetic only when the very next character is another `)`; otherwise the two are subshell
+    openers, one inside the other: `(( ($(x)) ))` is arithmetic and names no command, `(($(echo rm) -rf x) )` and `(($(echo rm) -rf x)\n)` run the
+    expanded word (card 358a37db round 2, Sam 4982: g1, g3, g7, g10). An unclosed pair is not arithmetic (the loud direction)."""
+    if state is None:
+        state = _quote_map(text)
+    depth, i = 1, k + 1
+    while i < len(text):
+        if state[i] == 0 and text[i - 1] != '\\':
+            if text[i] == '(':
+                depth += 1
+            elif text[i] == ')':
+                depth -= 1
+                if depth == 0:
+                    return text[i + 1:i + 2] == ')'
+        i += 1
+    return False
+
+
 def _arith_paren_group(text, k):
     """Is the `(` at text[k] a parenthesis INSIDE an arithmetic command `(( .. ))`: the chain of `(` in front of it, blanks between, ends in a `((`
     that is not a `<((` / `>((` (a subshell inside a process substitution)? `(( ($(x)) ))` is arithmetic, no command is named in it; `( ($(echo rm) ..) )`
@@ -5320,7 +5370,7 @@ def _arith_paren_group(text, k):
     if j < 0 or text[j] != '(':
         return False
     if j >= 1 and text[j - 1] == '(' and not (j >= 2 and text[j - 2] in '<>'):
-        return True
+        return _dparen_is_arith(text, j)                   # round 2: `(($(echo rm) ..) )` is two subshells, not arithmetic
     return _arith_paren_group(text, j)
 
 
@@ -5393,8 +5443,10 @@ def _opaque_substitution(text):
             if ch != '`' and text[w - 1] == '`' and not state[w - 1]:
                 return text[w:w + 30].strip()          # `` `$(echo rm) -rf x` ``: the substitution is the first word of the backtick's command list (card e766e16c, neighbour)
             k, gprefix = _walk_back(text, state, w, True)
-            if k >= 1 and text[k] == '(' and text[k - 1] == '(' and not (k >= 2 and text[k - 2] in '<>' and not state[k - 2]):
-                continue                               # inside (( )) / $(( )): arithmetic, no command is named there (`<((..))` is a subshell inside a process substitution)
+            if k >= 1 and text[k] == '(' and text[k - 1] == '(' and not (k >= 2 and text[k - 2] in '<>' and not state[k - 2]) \
+                    and (text[k - 2:k - 1] == '$' or _dparen_is_arith(text, k, state)):
+                continue                               # inside (( )) / $(( )): arithmetic, no command is named there (`<((..))` is a subshell inside a process substitution;
+                                                       # a bare `((` without an adjacent `))` closing it is two subshells, card 358a37db round 2)
             if k >= 0 and text[k] == '(' and not state[k] and not gprefix.strip():
                 # Card e766e16c, neighbour class: the substitution is the FIRST word behind a group opener: a subshell `($(echo rm) -rf x)`, a nested
                 # substitution `echo $($(echo rm) ..)`, a process substitution `cat <($(echo rm) ..)`, a backtick `` (`echo rm` -rf x) ``. Bash runs the
