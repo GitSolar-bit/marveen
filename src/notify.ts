@@ -196,6 +196,24 @@ async function telegramOwner(text: string, meta?: AlertMeta): Promise<void> {
   await sendToChat(owner.chatId, text, 'owner', { meta, recipient: 'owner' })
 }
 
+// What may reach the log from a message or an error (Sam 3550): a bot-token shape (no leading word boundary: the
+// provider's own URL carries it as `bot<digits>:<secret>`) and any long run of digits
+// (a chat id, a user id) are masked, and so are the configured token and chat id themselves. A provider's
+// error text is not under our control, and an alert's words are not either.
+export function scrubForLog(text: string, chatId: string): string {
+  let t = String(text)
+  for (const secret of [CHANNEL_TOKEN, chatId]) {
+    if (secret && secret.length >= 4) t = t.split(secret).join('<redacted>')
+  }
+  return t.replace(/\d{6,}:[A-Za-z0-9_-]{20,}/g, '<token>').replace(/\d{7,}/g, '<id>')
+}
+
+/** The scrubbed MESSAGE of a caught value, as a string. A log line that takes the caught Error itself serialises its message AND its
+ *  stack, unmasked (card fdd71470, the class of 805e4938). */
+export function scrubErrForLog(err: unknown, chatId: string): string {
+  return scrubForLog(err instanceof Error ? err.message : String(err), chatId)
+}
+
 // PR1655 review, ask 2: this used to return void and swallow every provider
 // exception, so a caller could not tell a delivered notification from a dead
 // one. It reports now; every existing caller ignores the value, so nothing

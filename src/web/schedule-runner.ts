@@ -16,6 +16,7 @@ import { isRepoShippedScript } from './precheck-trust.js'
 import { preCheckScriptPath } from './precheck-path.js'
 import { atomicWriteFileSync } from './atomic-write.js'
 import { logger } from '../logger.js'
+import { scrubErrForLog } from '../notify.js'
 import { decideDesktopGate, readDesktopLock, recordDesktopSkip } from './desktop-lock.js'
 import {
   PROJECT_ROOT,
@@ -1703,7 +1704,7 @@ function sendUsageLimitNotice(agentName: string, session: string, banner: string
       await sendSchedulerAlertMessage(token, ownerChat, text)
       logger.info({ agent: agentName, session }, 'usage-limit notice sent')
     } catch (err) {
-      logger.warn({ err, agent: agentName, session }, 'usage-limit notice delivery failed')
+      logger.warn({ err: scrubErrForLog(err, ownerChat), agent: agentName, session }, 'usage-limit notice delivery failed')
     }
   })()
 }
@@ -2685,7 +2686,7 @@ function sendCatchUpSummary(
       await sendSchedulerAlertMessage(token, ownerChat, text)
       logger.info({ caughtUp: caughtUp.length, stale: stale.length, provider: CHANNEL_PROVIDER }, 'catch-up summary alert sent')
     } catch (err) {
-      logger.warn({ err }, 'catch-up summary delivery failed')
+      logger.warn({ err: scrubErrForLog(err, ownerChat) }, 'catch-up summary delivery failed')
     }
   })()
 }
@@ -2836,10 +2837,10 @@ function sendPendingRetryAlert(view: PendingRetryView, nowMs: number): void {
       // rejection and spam the log until the config is fixed.
       const kind = classifySendError(err instanceof Error ? err.message : String(err))
       if (kind === 'transient') {
-        logger.warn({ err, task: view.taskName, agent: view.agentName }, 'Pending-retry alert delivery failed (transient), clearing stamp for retry')
+        logger.warn({ err: scrubErrForLog(err, ownerChat), task: view.taskName, agent: view.agentName }, 'Pending-retry alert delivery failed (transient), clearing stamp for retry')
         clearPendingTaskRetryOwnerAlert(view.taskName, view.agentName)
       } else {
-        logger.warn({ err, task: view.taskName, agent: view.agentName }, 'Pending-retry alert delivery failed (permanent), stamp kept to avoid 60s spin')
+        logger.warn({ err: scrubErrForLog(err, ownerChat), task: view.taskName, agent: view.agentName }, 'Pending-retry alert delivery failed (permanent), stamp kept to avoid 60s spin')
       }
     }
   })()
@@ -3026,7 +3027,7 @@ function sendTaskTimeoutAlert(entry: TaskInflightEntry, elapsedMs: number, reaso
       await sendSchedulerAlertMessage(token, ownerChat, text)
       logger.info({ task: entry.taskName, agent: entry.agentName, ageMinutes, provider: CHANNEL_PROVIDER }, 'task-timeout alert sent')
     } catch (err) {
-      logger.warn({ err, task: entry.taskName, agent: entry.agentName }, 'task-timeout alert delivery failed')
+      logger.warn({ err: scrubErrForLog(err, ownerChat), task: entry.taskName, agent: entry.agentName }, 'task-timeout alert delivery failed')
     }
   })()
 }

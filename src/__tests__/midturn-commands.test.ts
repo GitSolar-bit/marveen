@@ -12,6 +12,7 @@ import {
   parseQueuedChannelCommand, midTurnTick, newTailState, type MidTurnDeps, type TailState,
 } from '../web/midturn-commands.js'
 import type { DispatchResult } from '../web/routes/commands.js'
+import { logger } from '../logger.js'
 
 const OWNER = '8659214323'
 
@@ -243,5 +244,34 @@ describe('midTurnTick', () => {
     appendFileSync(file, queuedLine(channelPrompt('/runs')) + '\n')
     await expect(midTurnTick(state, deps)).resolves.toBe(0)
     expect(tries).toBe(3)
+  })
+
+  // Card fdd71470 (Sam 5629, the class of 805e4938): a provider's error text is not under our control; the log lines that report a
+  // failed reply must carry the scrubbed MESSAGE, never the Error (a logger serialises its message AND its stack, unmasked).
+  it('a provider error reaches the log scrubbed, as a string: the retry line and the give-up line', async () => {
+    const TOKEN_SHAPE = ['123456789', 'AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw'].join(':')
+    deps.send = async () => {
+      throw new Error(`Telegram API 400: Bad Request at https://api.telegram.org/bot${TOKEN_SHAPE}/sendMessage chat ${OWNER} user 9876543210`)
+    }
+    const warn = vi.spyOn(logger, 'warn')
+    try {
+      await midTurnTick(state, deps, true)
+      appendFileSync(file, queuedLine(channelPrompt('/runs')) + '\n')
+      await midTurnTick(state, deps)
+      const lines = warn.mock.calls.filter(c => String(c[1]).includes('reply send failed') || String(c[1]).includes('dispatch or reply failed'))
+      expect(lines.length).toBe(3) // two retries and the give-up
+      for (const c of lines) {
+        const obj = c[0] as { err?: unknown }
+        expect(typeof obj.err).toBe('string')
+        expect(obj.err).toContain('Telegram API 400') // the status the operator needs survives
+      }
+      const all = JSON.stringify(lines.map(c => c[0]))
+      expect(all).not.toContain(TOKEN_SHAPE)
+      expect(all).not.toContain(OWNER)
+      expect(all).not.toContain('9876543210')
+      expect(all).not.toContain('stack')
+    } finally {
+      warn.mockRestore()
+    }
   })
 })

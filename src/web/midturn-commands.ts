@@ -22,6 +22,7 @@ import { getProvider } from '../channel-provider.js'
 import { resolveOwnerChatId } from '../owner-chat.js'
 import { markIfTestRun } from '../test-run-marker.js'
 import { logger } from '../logger.js'
+import { scrubErrForLog } from '../notify.js'
 import { projectsDirFor } from './active-model.js'
 import { configDirFor } from './main-transcript-root.js'
 import { dispatchForChat } from './routes/commands.js'
@@ -173,7 +174,7 @@ async function sendWithRetry(deps: MidTurnDeps, chatId: string, text: string, th
       return
     } catch (err) {
       if (attempt >= SEND_ATTEMPTS) throw err
-      logger.warn({ err, attempt }, 'midturn-commands: reply send failed, retrying')
+      logger.warn({ err: scrubErrForLog(err, chatId), attempt }, 'midturn-commands: reply send failed, retrying')
       await sleep(SEND_RETRY_MS * attempt)
     }
   }
@@ -213,7 +214,7 @@ export async function midTurnTick(state: TailState, deps: MidTurnDeps, firstRun 
         'midturn-commands: answered a command that arrived mid-turn',
       )
     } catch (err) {
-      logger.warn({ err, text: cmd.text }, 'midturn-commands: dispatch or reply failed')
+      logger.warn({ err: scrubErrForLog(err, cmd.chatId), text: cmd.text }, 'midturn-commands: dispatch or reply failed')
     }
   }
   return handled
