@@ -12,7 +12,7 @@ import {
 import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
 import { resolveOwnerChatId } from '../../owner-chat.js'
-import { sendOwnerMessage } from '../../notify.js'
+import { sendOwnerMessage, scrubErrForLog } from '../../notify.js'
 import { sendTelegramMessage } from '../telegram.js'
 import { mayIssueCredentials, OWNER_SESSION_REQUIRED } from './auth.js'
 import type { RouteContext } from './types.js'
@@ -229,7 +229,7 @@ function notifyOwner(approval: Approval, chatApprovedMessageId: number | string 
         if (!informative && messageId != null) setApprovalTelegramMessageId(approval.id, messageId)
         logger.info({ approvalId: approval.id, messageId, informative }, 'approval owner notification sent')
       } catch (err) {
-        logger.warn({ err, approvalId: approval.id, informative }, 'approval owner notification FAILED -- the request is only visible on the dashboard')
+        logger.warn({ err: scrubErrForLog(err, ownerChat), approvalId: approval.id, informative }, 'approval owner notification FAILED -- the request is only visible on the dashboard')
         if (!informative) fallbackInBand(approval, 'send-failed')
       }
       return

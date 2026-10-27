@@ -274,4 +274,28 @@ describe('midTurnTick', () => {
       warn.mockRestore()
     }
   })
+
+  // Card 9964813a (Sam 2775, M10 / M12): a chat id that the long-digit rule does not mask (a Slack channel, a short id) is masked only through the
+  // chat id ARGUMENT of the scrub: the retry line (sendWithRetry) and the give-up line (midTurnTick) each pass their own.
+  it('a non-numeric chat id in a provider error is masked in the retry line and in the give-up line', async () => {
+    const SLACK = 'C04ABCD12'
+    deps.ownerChatId = () => SLACK
+    deps.send = async () => { throw new Error(`channel_not_found for ${SLACK}`) }
+    const warn = vi.spyOn(logger, 'warn')
+    try {
+      await midTurnTick(state, deps, true)
+      const attrs = `source="plugin:telegram:telegram" chat_id="${SLACK}" message_id="373" user="${SLACK}"`
+      appendFileSync(file, queuedLine(channelPrompt('/runs', attrs)) + '\n')
+      await midTurnTick(state, deps)
+      const lines = warn.mock.calls.filter(c => String(c[1]).includes('reply send failed') || String(c[1]).includes('dispatch or reply failed'))
+      expect(lines.length).toBe(3) // two retries and the give-up
+      for (const c of lines) {
+        const obj = c[0] as { err?: unknown }
+        expect(obj.err).toBe('channel_not_found for <redacted>')
+      }
+      expect(JSON.stringify(lines.map(c => c[0]))).not.toContain(SLACK)
+    } finally {
+      warn.mockRestore()
+    }
+  })
 })

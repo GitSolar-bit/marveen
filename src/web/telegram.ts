@@ -4,6 +4,7 @@ import { PROJECT_ROOT } from '../config.js'
 import { channelStateDir } from '../channel-provider.js'
 import { resolveOwnerChatId } from '../owner-chat.js'
 import { logger } from '../logger.js'
+import { scrubErrForLog } from '../notify.js'
 import { agentDir, readFileOr, findAvatarForAgent } from './agent-config.js'
 import { TOOL_TIMEOUTS } from '../tool-timeouts.js'
 import { markIfTestRun } from '../test-run-marker.js'
@@ -212,7 +213,7 @@ export async function sendWelcomeMessage(agentName: string, token: string): Prom
     }
     logger.info({ agentName }, 'Welcome message sent via Telegram')
   } catch (err) {
-    logger.warn({ err, agentName }, 'Failed to send welcome message')
+    logger.warn({ err: scrubErrForLog(err, chatId), agentName }, 'Failed to send welcome message')
   }
 }
 
@@ -239,7 +240,7 @@ export async function sendMarveenAvatarChange(avatarPath: string): Promise<void>
     await sendTelegramPhoto(token, chatId, avatarPath, 'Állítsd be profilképként: nyisd meg a @BotFather chatet, /setuserpic, válaszd ki a botodat, küldd be ezt a képet.')
     logger.info('Marveen avatar change message sent')
   } catch (err) {
-    logger.warn({ err }, 'Failed to send Marveen avatar change message')
+    logger.warn({ err: scrubErrForLog(err, chatId) }, 'Failed to send Marveen avatar change message')
   }
 }
 
@@ -263,7 +264,7 @@ export async function sendAvatarChangeMessage(agentName: string, avatarPath: str
     await sendTelegramPhoto(token, chatId, avatarPath, 'Állítsd be profilképként: nyisd meg a @BotFather chatet, /setuserpic, válaszd ki a botodat, küldd be ezt a képet.')
     logger.info({ agentName }, 'Avatar change message sent via Telegram')
   } catch (err) {
-    logger.warn({ err, agentName }, 'Failed to send avatar change message')
+    logger.warn({ err: scrubErrForLog(err, chatId), agentName }, 'Failed to send avatar change message')
   }
 }
 
@@ -289,16 +290,17 @@ export function parseTelegramToken(name: string): string | null {
 }
 
 export async function sendMarveenAlert(text: string): Promise<void> {
+  let chatId = ''                                   // declared outside the try: the catch masks the chat id in the provider's error text
   try {
     const envPath = join(PROJECT_ROOT, '.env')
     const envContent = readFileOr(envPath, '')
     const tokenMatch = envContent.match(/TELEGRAM_BOT_TOKEN=(.+)/)
     const token = tokenMatch?.[1]?.trim()
     if (!token) return
-    const chatId = resolveOwnerChatId()
+    chatId = resolveOwnerChatId() ?? ''
     if (!chatId) { logger.warn('Telegram send skipped: no owner chat on this install'); return }
     await sendTelegramMessage(token, chatId, text)
   } catch (err) {
-    logger.warn({ err }, 'Failed to send marveen plugin alert')
+    logger.warn({ err: scrubErrForLog(err, chatId) }, 'Failed to send marveen plugin alert')
   }
 }

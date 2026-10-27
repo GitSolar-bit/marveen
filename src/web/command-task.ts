@@ -6,6 +6,7 @@ import { shQuote } from "./ssh-tmux.js"
 import { resolveOwnerChatId } from "../owner-chat.js"
 import { atomicWriteFileSync } from "./atomic-write.js"
 import { logger } from "../logger.js"
+import { scrubErrForLog } from "../notify.js"
 import { sendTelegramMessage } from "./telegram.js"
 import { appendTaskRun, markTaskRunCompleted } from "../db.js"
 import { trackDetachedGroup } from "./detached-groups.js"
@@ -232,5 +233,5 @@ function finish(
     : `\u{1F7E2} Helyre\u00e1llt: ${label} ism\u00e9t OK.`
   sendTelegramMessage(TELEGRAM_BOT_TOKEN, ownerChat, text)
     .then(() => logger.info({ task: task.name, action }, "command task alert sent"))
-    .catch((err) => logger.warn({ err, task: task.name }, "command task alert send failed"))
+    .catch((err) => logger.warn({ err: scrubErrForLog(err, ownerChat), task: task.name }, "command task alert send failed"))
 }

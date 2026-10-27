@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { initDatabase, listAgentMessages, getApproval } from '../db.js'
 import type { RouteContext } from '../web/routes/types.js'
+import { logger } from '../logger.js'
 
 // PR1655 review (delta of 82694550), asks 2 and 3: the route's owner
 // notification has two branches -- Telegram (kept because it records the
@@ -23,22 +24,27 @@ const { cfg } = vi.hoisted(() => ({
     ownerChat: '111' as string | null,
     ownerResult: { sent: true } as { sent: boolean; reason?: string },
     telegramThrows: false,
+    telegramError: 'Telegram API 400',
   },
 }))
 
 const ownerSends: string[] = []
-vi.mock('../notify.js', () => ({
-  sendOwnerMessage: async (text: string) => { ownerSends.push(text); return cfg.ownerResult },
-  notifyChannel: async () => {},
-  notifyTelegram: async () => {},
-  notifySecurityEvent: async () => {},
-}))
+vi.mock('../notify.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../notify.js')>()
+  return {
+    sendOwnerMessage: async (text: string) => { ownerSends.push(text); return cfg.ownerResult },
+    notifyChannel: async () => {},
+    notifyTelegram: async () => {},
+    notifySecurityEvent: async () => {},
+    scrubErrForLog: real.scrubErrForLog, // the real one: the log line of a failed send is pinned below
+  }
+})
 
 const telegramSends: unknown[][] = []
 vi.mock('../web/telegram.js', () => ({
   sendTelegramMessage: async (...args: unknown[]) => {
     telegramSends.push(args)
-    if (cfg.telegramThrows) throw new Error('Telegram API 400')
+    if (cfg.telegramThrows) throw new Error(cfg.telegramError)
     return 42
   },
 }))
@@ -128,6 +134,31 @@ describe('a Telegram install: the Telegram branch, with its own fallback', () =>
     const rows = ownerUnreached()
     expect(rows).toHaveLength(1)
     expect(rows[0]).toContain('[OWNER_UNREACHED send-failed]')
+  })
+
+  // Card 9964813a (Sam 2775, the class of fdd71470): the log line of the failed send carries the scrubbed MESSAGE, a string. The chat id is not
+  // numeric here on purpose (a long-digit rule cannot mask it): only the chat id ARGUMENT of the scrub does.
+  it('a FAILED Telegram send logs the scrubbed message, not the Error: the token shape, the chat id and a user id are masked', async () => {
+    const TOKEN_SHAPE = ['123456789', 'AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw'].join(':')
+    cfg.telegramThrows = true
+    cfg.ownerChat = 'C04ABCD12'
+    cfg.telegramError = `Telegram API 400: channel C04ABCD12 not found at https://api.telegram.org/bot${TOKEN_SHAPE}/sendMessage user 9876543210`
+    const warn = vi.spyOn(logger, 'warn')
+    try {
+      await kerest()
+      const calls = warn.mock.calls.filter(c => String(c[1]).includes('approval owner notification FAILED'))
+      expect(calls.length).toBe(1)
+      const obj = calls[0][0] as { err?: unknown }
+      expect(typeof obj.err).toBe('string')
+      expect(obj.err).toContain('Telegram API 400')
+      const all = JSON.stringify(obj)
+      expect(all).not.toContain(TOKEN_SHAPE)
+      expect(all).not.toContain('C04ABCD12')
+      expect(all).not.toContain('9876543210')
+      expect(all).not.toContain('stack')
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('no owner chat on a Telegram install: no send, in-band fallback as no-owner-chat', async () => {

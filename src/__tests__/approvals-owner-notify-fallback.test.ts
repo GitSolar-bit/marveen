@@ -23,6 +23,7 @@ vi.mock('../notify.js', () => ({
   notifyChannel: async (text: string) => { sent.push(text) },
   notifyTelegram: async () => {},
   notifySecurityEvent: async () => {},
+  scrubErrForLog: (err: unknown) => String(err instanceof Error ? err.message : err), // the route takes it from notify.js
 }))
 
 vi.mock('../web/telegram.js', () => ({
